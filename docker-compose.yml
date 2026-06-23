@@ -1,0 +1,45 @@
+version: '3.8'
+
+services:
+  # FastAPI Backend
+  backend:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    ports:
+      - "8000:8000"
+    environment:
+      - SUPABASE_URL=${SUPABASE_URL}
+      - SUPABASE_KEY=${SUPABASE_KEY}
+      - SUPABASE_SERVICE_KEY=${SUPABASE_SERVICE_KEY}
+      - SECRET_KEY=${SECRET_KEY}
+      - DEBUG=${DEBUG:-True}
+      - DEFAULT_UPLOAD_INTERVAL=${DEFAULT_UPLOAD_INTERVAL:-240}
+    volumes:
+      - ./backend:/app/backend
+    command: python -m uvicorn main:app --host 0.0.0.0 --port 8000 --reload
+    depends_on:
+      - nginx
+    networks:
+      - lab-network
+
+  # Nginx - Serve frontend and proxy API
+  nginx:
+    image: nginx:alpine
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./frontend:/usr/share/nginx/html:ro
+      - ./nginx.conf:/etc/nginx/nginx.conf:ro
+    networks:
+      - lab-network
+    depends_on:
+      - backend
+
+networks:
+  lab-network:
+    driver: bridge
+
+volumes:
+  backend-data:
