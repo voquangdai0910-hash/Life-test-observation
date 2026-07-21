@@ -331,7 +331,7 @@ body {
    TEST DETAIL
 ═══════════════════════════════ */
 .detail-grid { display: grid; grid-template-columns: 1fr 340px; gap: 16px; align-items: start; }
-.detail-left  { display: grid; grid-template-columns: 2fr 1fr; gap: 12px; align-items: start; }
+.detail-left  { display: grid; grid-template-columns: 2fr 1fr; gap: 12px; align-items: stretch; }
 .detail-right { align-self: start; }
 
 /* Cards that should span the full width of the detail-left grid */
@@ -371,7 +371,7 @@ body {
 .counter-card .progress-bar-fill { background: linear-gradient(90deg, #34d399, #6ee7b7); }
 
 /* Cycle card */
-.cycle-card { text-align: center; }
+.cycle-card { text-align: center; display: flex; flex-direction: column; justify-content: center; }
 .cycle-label { font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: .8px; margin-bottom: 10px; }
 .cycle-state-big {
     font-size: 28px; font-weight: 900; padding: 7px 24px;
@@ -489,6 +489,34 @@ body {
 @keyframes slideUp {
     from { transform: translateY(12px); opacity: 0; }
     to   { transform: translateY(0);    opacity: 1; }
+}
+
+/* ═══════════════════════════════
+   CONFIRM DIALOG
+═══════════════════════════════ */
+.confirm-overlay {
+    position: fixed; inset: 0; z-index: 9998;
+    display: flex; align-items: center; justify-content: center;
+    padding: 20px;
+    background: rgba(15,23,42,.55); backdrop-filter: blur(2px);
+    animation: fadeIn .15s ease;
+}
+.confirm-box {
+    background: var(--surface); border-radius: 16px;
+    padding: 26px 26px 20px; width: 100%; max-width: 400px;
+    box-shadow: 0 24px 60px rgba(0,0,0,.35);
+    text-align: center; animation: popIn .18s ease;
+}
+.confirm-icon { font-size: 32px; margin-bottom: 10px; line-height: 1; }
+.confirm-box h3 { font-size: 18px; font-weight: 800; color: var(--text); margin-bottom: 8px; }
+.confirm-box p { font-size: 14px; color: var(--text-2); line-height: 1.6; white-space: pre-line; margin-bottom: 22px; }
+.confirm-actions { display: flex; gap: 10px; justify-content: center; }
+.confirm-actions .btn { min-width: 120px; }
+
+@keyframes fadeIn { from { opacity: 0; } to { opacity: 1; } }
+@keyframes popIn {
+    from { transform: translateY(8px) scale(.98); opacity: 0; }
+    to   { transform: none; opacity: 1; }
 }
 
 /* ═══════════════════════════════

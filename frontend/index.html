@@ -4,7 +4,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Life Test Observation</title>
-    <link rel="stylesheet" href="css/style.css?v=308">
+    <link rel="stylesheet" href="css/style.css?v=310">
 </head>
 <body>
 <div id="app">
@@ -336,10 +336,23 @@
     </div>
 </div>
 
+<!-- Themed confirmation dialog -->
+<div id="confirmOverlay" class="confirm-overlay" style="display:none;">
+    <div class="confirm-box">
+        <div class="confirm-icon" id="confirmIcon" style="display:none;"></div>
+        <h3 id="confirmTitle">Confirm</h3>
+        <p id="confirmMessage"></p>
+        <div class="confirm-actions">
+            <button class="btn btn-outline" id="confirmCancel">Cancel</button>
+            <button class="btn btn-primary" id="confirmOk">OK</button>
+        </div>
+    </div>
+</div>
+
 <div id="toast" class="toast" style="display:none;"></div>
 
-<script src="js/api.js?v=304"></script>
-<script src="js/app.js?v=304"></script>
+<script src="js/api.js?v=309"></script>
+<script src="js/app.js?v=309"></script>
 </body>
 </html>
 

@@ -208,6 +208,52 @@ function showToast(msg, type = 'info') {
     setTimeout(() => { t.style.display = 'none'; }, 3500);
 }
 
+/**
+ * Themed confirmation dialog (replaces the native confirm()).
+ * Returns a Promise<boolean> — true on OK, false on Cancel/Esc/backdrop.
+ */
+function confirmDialog({ title = 'Are you sure?', message = '', okText = 'OK',
+                         cancelText = 'Cancel', okClass = 'btn-primary', icon = '' } = {}) {
+    return new Promise(resolve => {
+        const overlay = document.getElementById('confirmOverlay');
+        if (!overlay) { resolve(window.confirm(message)); return; }
+
+        document.getElementById('confirmTitle').textContent = title;
+        document.getElementById('confirmMessage').textContent = message;
+        const iconEl = document.getElementById('confirmIcon');
+        iconEl.innerHTML = icon || '';
+        iconEl.style.display = icon ? '' : 'none';
+
+        const okBtn = document.getElementById('confirmOk');
+        const cancelBtn = document.getElementById('confirmCancel');
+        okBtn.textContent = okText;
+        cancelBtn.textContent = cancelText;
+        okBtn.className = `btn ${okClass}`;
+        overlay.style.display = 'flex';
+
+        function cleanup(result) {
+            overlay.style.display = 'none';
+            okBtn.removeEventListener('click', onOk);
+            cancelBtn.removeEventListener('click', onCancel);
+            overlay.removeEventListener('click', onBackdrop);
+            document.removeEventListener('keydown', onKey);
+            resolve(result);
+        }
+        const onOk = () => cleanup(true);
+        const onCancel = () => cleanup(false);
+        const onBackdrop = (e) => { if (e.target === overlay) cleanup(false); };
+        const onKey = (e) => {
+            if (e.key === 'Escape') cleanup(false);
+            else if (e.key === 'Enter') cleanup(true);
+        };
+        okBtn.addEventListener('click', onOk);
+        cancelBtn.addEventListener('click', onCancel);
+        overlay.addEventListener('click', onBackdrop);
+        document.addEventListener('keydown', onKey);
+        okBtn.focus();
+    });
+}
+
 function switchLoginTab(name, btn) {
     document.querySelectorAll('.tab-content').forEach(e => e.classList.remove('active'));
     document.querySelectorAll('.tab-btn').forEach(e => e.classList.remove('active'));
@@ -342,10 +388,16 @@ function updatePauseButton() {
 async function handlePauseResumeAll() {
     const action = systemState.is_paused ? 'resume' : 'pause';
     const label  = systemState.is_paused ? 'Resume' : 'Pause';
-    if (!confirm(`Are you sure you want to ${label} ALL slots?\n\n` +
-        (action === 'pause'
+    const ok = await confirmDialog({
+        title: `${label} ALL slots?`,
+        message: action === 'pause'
             ? 'This will freeze all running time counters. Use this on non-working days (e.g. Sundays).'
-            : 'This will restart all time counters from where they left off.'))) return;
+            : 'This will restart all time counters from where they left off.',
+        okText: action === 'pause' ? 'Pause All' : 'Resume All',
+        okClass: action === 'pause' ? 'btn-warning' : 'btn-resume',
+        icon: action === 'pause' ? '&#9208;' : '&#9654;'
+    });
+    if (!ok) return;
     try {
         if (action === 'pause') {
             await api.pauseSystem('Factory off-day pause');
