@@ -4,7 +4,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Life Test Observation</title>
-    <link rel="stylesheet" href="css/style.css">
+    <link rel="stylesheet" href="css/style.css?v=308">
 </head>
 <body>
 <div id="app">
@@ -169,21 +169,21 @@
                                 <h3>Sync Machine Reading</h3>
                                 <p class="sync-form-hint">Enter the hours and minutes shown on the machine display.</p>
                                 <form onsubmit="handleSync(event)" class="sync-form">
-                                    <div class="sync-inputs">
-                                        <div class="form-group">
-                                            <label>Hours</label>
-                                            <input type="number" id="syncHours" min="0" required placeholder="356">
+                                    <div class="sync-grid">
+                                        <div class="sync-fields">
+                                            <div class="form-group">
+                                                <label>Hours</label>
+                                                <input type="number" id="syncHours" min="0" required placeholder="356">
+                                            </div>
+                                            <div class="form-group">
+                                                <label>Minutes</label>
+                                                <input type="number" id="syncMinutes" min="0" max="59" required placeholder="48">
+                                            </div>
                                         </div>
-                                        <div class="sync-sep">h</div>
-                                        <div class="form-group">
-                                            <label>Minutes</label>
-                                            <input type="number" id="syncMinutes" min="0" max="59" required placeholder="48">
+                                        <div class="form-group sync-notes">
+                                            <label>Notes (optional)</label>
+                                            <textarea id="syncNotes" placeholder="Any observation..."></textarea>
                                         </div>
-                                        <div class="sync-sep">m</div>
-                                    </div>
-                                    <div class="form-group">
-                                        <label>Notes (optional)</label>
-                                        <input type="text" id="syncNotes" placeholder="Any observation...">
                                     </div>
                                     <button type="submit" class="btn btn-primary">Sync</button>
                                 </form>
