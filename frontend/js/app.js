@@ -1,741 +1,785 @@
-// Version check - force refresh if old version is cached
-const APP_VERSION = '2.1.0';
-const CACHED_VERSION = localStorage.getItem('appVersion');
-if (CACHED_VERSION !== APP_VERSION) {
-    localStorage.setItem('appVersion', APP_VERSION);
-    if (CACHED_VERSION) {
-        // Old version was cached, reload to get new one
-        location.reload(true);
+﻿// ==================== Live Counter Engine ====================
+
+let currentDetailTest = null;   // test object shown in detail view
+let liveTestData = [];          // all tests being tracked
+let counterTick = null;         // setInterval handle
+const SYNC_INTERVAL_MIN = 240;  // default 4 hours
+
+/** Global system pause state – populated by fetchSystemState() */
+let systemState = {
+    is_paused: false,
+    paused_at: null,
+    paused_by_name: null,
+    total_paused_minutes_ever: 0
+};
+
+/** Normalise an ISO datetime string to always be parsed as UTC */
+function toUtcMs(iso) {
+    if (!iso) return 0;
+    // Append Z if no timezone info present, so JS treats it as UTC
+    const s = /[Zz]$|[+-]\d{2}:\d{2}$/.test(iso) ? iso : iso + 'Z';
+    return new Date(s).getTime();
+}
+
+/**
+ * Effective "now" in ms — frozen at paused_at when system is paused.
+ * @param {boolean} isPaused
+ * @param {string|null} pausedAt  ISO string
+ */
+function effectiveNowMs(isPaused, pausedAt) {
+    return (isPaused && pausedAt) ? toUtcMs(pausedAt) : Date.now();
+}
+
+/** Calculate ON time accumulated since last sync (seconds), subtracting paused time */
+function calcOnSeconds(syncedAt, onMinutes, offMinutes, pausedSecSinceSync, isPaused, pausedAt) {
+    const nowMs  = effectiveNowMs(isPaused, pausedAt);
+    const syncMs = toUtcMs(syncedAt);
+    const rawElapsed = Math.max(0, (nowMs - syncMs) / 1000);
+    const elapsed    = Math.max(0, rawElapsed - (pausedSecSinceSync || 0));
+    const onSec   = onMinutes * 60;
+    const cycleSec = (onMinutes + offMinutes) * 60;
+    const full     = Math.floor(elapsed / cycleSec);
+    const rem      = elapsed % cycleSec;
+    return full * onSec + Math.min(rem, onSec);
+}
+
+/** Estimate current machine hours */
+function estimateHours(lastSyncHours, syncedAt, onMinutes, offMinutes, pausedSecSinceSync, isPaused, pausedAt) {
+    return lastSyncHours + calcOnSeconds(syncedAt, onMinutes, offMinutes, pausedSecSinceSync, isPaused, pausedAt) / 3600;
+}
+
+/** Return {state, remainSec} for the current cycle phase */
+function cycleState(syncedAt, onMinutes, offMinutes, pausedSecSinceSync, isPaused, pausedAt) {
+    const nowMs    = effectiveNowMs(isPaused, pausedAt);
+    const syncMs   = toUtcMs(syncedAt);
+    const rawElapsed = Math.max(0, (nowMs - syncMs) / 1000);
+    const elapsed    = Math.max(0, rawElapsed - (pausedSecSinceSync || 0));
+    const onSec    = onMinutes * 60;
+    const cycleSec = (onMinutes + offMinutes) * 60;
+    const pos = ((elapsed % cycleSec) + cycleSec) % cycleSec;
+    if (pos < onSec) return { state: 'ON',  remainSec: Math.ceil(onSec - pos) };
+    return            { state: 'OFF', remainSec: Math.ceil(cycleSec - pos) };
+}
+
+/** Seconds until next sync is due (using effective elapsed time, so pause suspends countdown) */
+function secondsUntilNextSync(syncedAt, intervalMin, pausedSecSinceSync, isPaused, pausedAt) {
+    const nowMs   = effectiveNowMs(isPaused, pausedAt);
+    const syncMs  = toUtcMs(syncedAt);
+    const rawElapsed = Math.max(0, (nowMs - syncMs) / 1000);
+    const effectiveElapsed = Math.max(0, rawElapsed - (pausedSecSinceSync || 0));
+    return Math.max(0, Math.round(intervalMin * 60 - effectiveElapsed));
+}
+
+function fmtHMS(hours) {
+    const totalSec = Math.floor(hours * 3600);
+    const h = Math.floor(totalSec / 3600);
+    const m = Math.floor((totalSec % 3600) / 60);
+    const s = totalSec % 60;
+    return `${h}h ${String(m).padStart(2,'0')}m ${String(s).padStart(2,'0')}s`;
+}
+
+function fmtHM(hours) {
+    const h = Math.floor(hours);
+    const m = Math.round((hours - h) * 60);
+    return `${h}h ${String(m).padStart(2,'0')}m`;
+}
+
+function fmtSec(sec) {
+    const h = Math.floor(sec / 3600);
+    const m = Math.floor((sec % 3600) / 60);
+    const s = sec % 60;
+    if (h > 0) return `${h}h ${String(m).padStart(2,'0')}m`;
+    return `${String(m).padStart(2,'0')}:${String(s).padStart(2,'0')}`;
+}
+
+/** Format a duration in seconds as "Xd Yh Zm" (or "Hh Mm" / "Mm") */
+function fmtDuration(sec) {
+    sec = Math.max(0, Math.floor(sec || 0));
+    const d = Math.floor(sec / 86400);
+    const h = Math.floor((sec % 86400) / 3600);
+    const m = Math.floor((sec % 3600) / 60);
+    if (d > 0) return `${d}d ${h}h ${m}m`;
+    if (h > 0) return `${h}h ${m}m`;
+    return `${m}m`;
+}
+
+function fmtDateTime(iso) {
+    if (!iso) return '--';
+    return new Date(iso).toLocaleString();
+}
+
+function fmtTime(iso) {
+    if (!iso) return '--:--';
+    return new Date(iso).toLocaleTimeString();
+}
+
+function setText(id, val) {
+    const el = document.getElementById(id);
+    if (el) el.textContent = val;
+}
+
+/** Map an internal status value to its user-facing label (value stays unchanged) */
+function statusLabel(status) {
+    return { running: 'Ongoing', completed: 'Completed', paused: 'Paused' }[status] || status || '';
+}
+
+/** Escape a value for safe interpolation into innerHTML (prevents stored XSS) */
+function esc(val) {
+    if (val == null) return '';
+    return String(val).replace(/[&<>"']/g, c => ({
+        '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
+    }[c]));
+}
+
+// ── Tick every second ──
+function startCounterTick() {
+    if (counterTick) clearInterval(counterTick);
+    counterTick = setInterval(tick, 1000);
+    tick(); // immediate first render
+}
+
+function tick() {
+    const isPaused  = systemState.is_paused;
+    const pausedAt  = systemState.paused_at;
+
+    // Update dashboard cards
+    liveTestData.forEach(test => {
+        if (test.status !== 'running' || !test.last_sync) return;
+        const ls  = test.last_sync;
+        const syncedAt = ls.syncedAt || ls.synced_at;
+        const psec = test.paused_seconds_since_sync || 0;
+        const est = estimateHours(ls.machine_hours, syncedAt, test.on_minutes, test.off_minutes, psec, isPaused, pausedAt);
+        const cs  = cycleState(syncedAt, test.on_minutes, test.off_minutes, psec, isPaused, pausedAt);
+        const nxt = secondsUntilNextSync(syncedAt, SYNC_INTERVAL_MIN, psec, isPaused, pausedAt);
+
+        const cardEst = document.getElementById(`card-est-${test.id}`);
+        if (cardEst) cardEst.textContent = fmtHMS(est);
+        const stateEl = document.getElementById(`card-state-${test.id}`);
+        if (stateEl) {
+            stateEl.textContent = isPaused ? 'PAUSED' : (cs.state === 'ON' ? 'ON' : 'OFF');
+            stateEl.className   = isPaused ? 'cycle-badge paused' : `cycle-badge ${cs.state === 'ON' ? 'on' : 'off'}`;
+        }
+        setText(`card-remain-${test.id}`, isPaused ? '--:--' : fmtSec(cs.remainSec));
+        setText(`card-next-${test.id}`,   isPaused ? 'Paused' : (nxt > 0 ? fmtSec(nxt) : 'OVERDUE'));
+
+        const nxtEl = document.getElementById(`card-next-${test.id}`);
+        if (nxtEl) nxtEl.className = (!isPaused && nxt === 0) ? 'overdue' : '';
+    });
+
+    // Update detail view — only if test is still running
+    if (currentDetailTest && currentDetailTest.status === 'running' && currentDetailTest.last_sync) {
+        const t  = currentDetailTest;
+        const ls = t.last_sync;
+        const syncedAt = ls.syncedAt || ls.synced_at;
+        const psec = t.paused_seconds_since_sync || 0;
+        const est = estimateHours(ls.machine_hours, syncedAt, t.on_minutes, t.off_minutes, psec, isPaused, pausedAt);
+        const cs  = cycleState(syncedAt, t.on_minutes, t.off_minutes, psec, isPaused, pausedAt);
+        const nxt = secondsUntilNextSync(syncedAt, SYNC_INTERVAL_MIN, psec, isPaused, pausedAt);
+        const pct = Math.min(est / t.target_hours * 100, 100);
+
+        setText('detailCounter', fmtHMS(est));
+        setText('detailProgress', pct.toFixed(1) + '%');
+        const fill = document.getElementById('detailProgressFill');
+        if (fill) fill.style.width = pct.toFixed(1) + '%';
+
+        const stEl = document.getElementById('detailCycleState');
+        if (stEl) {
+            stEl.textContent = isPaused ? 'PAUSED' : (cs.state === 'ON' ? 'ON' : 'OFF');
+            stEl.className   = isPaused ? 'cycle-state-big paused' : `cycle-state-big ${cs.state === 'ON' ? 'on' : 'off'}`;
+        }
+        setText('detailCycleRemain', isPaused ? '--:--' : fmtSec(cs.remainSec));
+
+        const nxtEl = document.getElementById('detailNextSync');
+        if (nxtEl) {
+            nxtEl.textContent = isPaused ? 'Paused' : (nxt > 0 ? fmtSec(nxt) : 'OVERDUE');
+            nxtEl.className   = `sync-info-val sync-countdown${(!isPaused && nxt === 0) ? ' overdue' : ''}`;
+        }
     }
 }
 
-// ==================== Utility Functions ====================
+// ==================== Auth ====================
 
-function showToast(message, type = 'info') {
-    const toast = document.getElementById('toast');
-    if (toast) {
-        toast.textContent = message;
-        toast.className = `toast ${type}`;
-        toast.style.display = 'block';
-        
-        setTimeout(() => {
-            toast.style.display = 'none';
-        }, 3000);
-    }
+function showToast(msg, type = 'info') {
+    const t = document.getElementById('toast');
+    if (!t) return;
+    t.textContent = msg;
+    t.className = `toast ${type}`;
+    t.style.display = 'block';
+    setTimeout(() => { t.style.display = 'none'; }, 3500);
 }
 
-function showStatus(elementId, message, type = 'info') {
-    const element = document.getElementById(elementId);
-    if (element) {
-        element.textContent = message;
-        element.className = `status-message ${type}`;
-        element.style.display = 'block';
-    }
+function switchLoginTab(name, btn) {
+    document.querySelectorAll('.tab-content').forEach(e => e.classList.remove('active'));
+    document.querySelectorAll('.tab-btn').forEach(e => e.classList.remove('active'));
+    document.getElementById(name + 'Tab').classList.add('active');
+    btn.classList.add('active');
 }
 
-function formatDateTime(dateString) {
-    if (!dateString) return '--';
-    const date = new Date(dateString);
-    return date.toLocaleDateString() + ' ' + date.toLocaleTimeString();
-}
-
-function formatDate(dateString) {
-    if (!dateString) return '--';
-    return new Date(dateString).toLocaleDateString();
-}
-
-function formatTime(dateString) {
-    if (!dateString) return '--:--';
-    return new Date(dateString).toLocaleTimeString();
-}
-
-function getTimeUntil(targetDate) {
-    const now = new Date();
-    const target = new Date(targetDate);
-    const diff = target - now;
-    
-    if (diff < 0) return 'Overdue';
-    
-    const hours = Math.floor(diff / (1000 * 60 * 60));
-    const minutes = Math.floor((diff % (1000 * 60 * 60)) / (1000 * 60));
-    
-    if (hours > 0) {
-        return `${hours}h ${minutes}m`;
-    }
-    return `${minutes}m`;
-}
-
-function closeModal(event) {
-    if (event && event.target.id !== 'detailsModal') return;
-    document.getElementById('detailsModal').classList.remove('show');
-}
-
-// ==================== Tab and Section Navigation ====================
-
-function switchTab(tab) {
-    // Remove active class from all tabs
-    document.querySelectorAll('.tab-content').forEach(el => {
-        el.classList.remove('active');
-    });
-    document.querySelectorAll('.tab-btn').forEach(el => {
-        el.classList.remove('active');
-    });
-    
-    // Add active class to selected tab
-    document.getElementById(tab + 'Tab').classList.add('active');
-    event.target.classList.add('active');
-}
-
-function showSection(section) {
-    event.preventDefault();
-    
-    // Remove active from all sections
-    document.querySelectorAll('.section').forEach(el => {
-        el.classList.remove('active');
-    });
-    document.querySelectorAll('.nav-item').forEach(el => {
-        el.classList.remove('active');
-    });
-    
-    // Add active to selected section
-    document.getElementById(section + 'Section').classList.add('active');
-    
-    // Add active to nav item
-    event.target.closest('.nav-item').classList.add('active');
-    
-    // Load section data
-    loadSectionData(section);
-}
-
-// ==================== Authentication Functions ====================
-
-async function handleLogin(event) {
-    event.preventDefault();
-    
-    const email = document.getElementById('loginEmail').value;
-    const password = document.getElementById('loginPassword').value;
-    
+async function handleLogin(e) {
+    e.preventDefault();
     try {
-        const response = await api.login(email, password);
-        
-        api.setToken(response.access_token);
-        api.setUser(response.user);
-        
-        showToast('Login successful!', 'success');
+        const res = await api.login(
+            document.getElementById('loginEmail').value,
+            document.getElementById('loginPassword').value
+        );
+        api.setToken(res.access_token);
+        api.setUser(res.user);
         showDashboard();
-    } catch (error) {
-        showToast(error.message, 'error');
-    }
+    } catch(err) { showToast(err.message, 'error'); }
 }
 
-async function handleRegister(event) {
-    event.preventDefault();
-    
-    const name = document.getElementById('registerName').value;
-    const email = document.getElementById('registerEmail').value;
-    const password = document.getElementById('registerPassword').value;
-    const role = document.getElementById('registerRole').value;
-    
+async function handleRegister(e) {
+    e.preventDefault();
     try {
-        const response = await api.register(email, password, name, role);
-        
-        api.setToken(response.access_token);
-        api.setUser(response.user);
-        
-        showToast('Registration successful!', 'success');
+        const res = await api.register(
+            document.getElementById('registerEmail').value,
+            document.getElementById('registerPassword').value,
+            document.getElementById('registerName').value
+        );
+        api.setToken(res.access_token);
+        api.setUser(res.user);
         showDashboard();
-    } catch (error) {
-        showToast(error.message, 'error');
-    }
+    } catch(err) { showToast(err.message, 'error'); }
 }
 
 function handleLogout() {
+    if (counterTick) clearInterval(counterTick);
     localStorage.removeItem('auth_token');
     localStorage.removeItem('user');
     location.reload();
 }
 
-// ==================== View Management ====================
+// ==================== Navigation ====================
+
+function showSection(name, navEl) {
+    document.querySelectorAll('.section').forEach(s => s.classList.remove('active'));
+    document.querySelectorAll('.nav-item').forEach(n => n.classList.remove('active'));
+    const sec = document.getElementById(name + 'Section');
+    if (sec) sec.classList.add('active');
+    if (navEl) navEl.classList.add('active');
+
+    if (name === 'dashboard') loadLifeTests();
+    if (name === 'reports')   loadReports();
+    if (name === 'settings')  loadSettings();
+}
 
 function showDashboard() {
     document.getElementById('loginView').style.display = 'none';
     document.getElementById('dashboardView').style.display = 'flex';
-    
-    // Update user info
+
     const user = api.user;
-    document.getElementById('userName').textContent = user.full_name || user.email;
-    document.getElementById('userRole').textContent = `(${user.role.replace('_', ' ')})`;
-    
-    // Show/hide sections based on role
-    const isOperator = user.role === 'operator';
-    const isAccessPerson = user.role === 'access_person';
+    setText('navUserName', user.full_name || user.email);
+    const roleLabel = { operator: 'Operator', access_person: 'Supervisor', admin: 'Admin' };
+    const roleBadge = document.getElementById('navUserRole');
+    if (roleBadge) {
+        roleBadge.textContent = roleLabel[user.role] || user.role;
+        roleBadge.className = `role-badge role-${user.role}`;
+    }
+
+    const isOp    = user.role === 'operator';
+    const isAP    = user.role === 'access_person';
     const isAdmin = user.role === 'admin';
-    
-    document.getElementById('uploadNavBtn').style.display = isOperator ? 'flex' : 'none';
-    document.getElementById('testingNavBtn').style.display = isOperator ? 'flex' : 'none';
-    document.getElementById('reportsNavBtn').style.display = isAccessPerson || isAdmin ? 'flex' : 'none';
-    document.getElementById('settingsNavBtn').style.display = isAdmin ? 'flex' : 'none';
-    
-    // Show/hide dashboard stats based on role
-    document.getElementById('operatorStats').style.display = isOperator ? 'grid' : 'none';
-    document.getElementById('accessPersonStats').style.display = isAccessPerson || isAdmin ? 'grid' : 'none';
-    
-    // Load ON hours for operators
-    if (isOperator) {
-        loadOnHoursProgress();
-    }
-    
-    loadDashboard();
+
+    const show = (id, v) => { const el = document.getElementById(id); if(el) el.style.display = v ? '' : 'none'; };
+    show('navNewTest',   isOp || isAdmin);
+    show('navReports',   isAP || isAdmin);
+    show('navSettings',  isAdmin);
+    show('dashNewTestBtn', isOp || isAdmin);
+    // Pause button visible for operators and admins only
+    show('pauseAllBtn', isOp || isAdmin);
+
+    loadLifeTests();
+    fetchSystemState();   // load pause state before starting tick
+    startCounterTick();
 }
 
-// ==================== Dashboard Data Loading ====================
+// ==================== Life Tests ====================
 
-async function loadDashboard() {
+/** Fetch and cache system pause state, then update UI */
+async function fetchSystemState() {
     try {
-        const summary = await api.getDashboardSummary();
-        
-        if (api.user.role === 'operator') {
-            document.getElementById('myUploadsCount').textContent = summary.my_uploads;
-            document.getElementById('uploadInterval').textContent = formatInterval(summary.upload_interval_minutes);
-            
-            // Update next deadline
-            if (summary.next_upload_deadline) {
-                document.getElementById('nextDeadline').textContent = getTimeUntil(summary.next_upload_deadline);
-            }
+        const res = await api.getSystemState();
+        systemState.is_paused              = res.is_paused;
+        systemState.paused_at             = res.paused_at || null;
+        systemState.paused_by_name        = res.paused_by_name || null;
+        systemState.total_paused_minutes_ever = res.total_paused_minutes_ever || 0;
+        updatePauseBanner();
+        updatePauseButton();
+    } catch (err) {
+        console.warn('Could not fetch system state:', err.message);
+    }
+}
+
+/** Show/hide and populate the system pause banner */
+function updatePauseBanner() {
+    const banner = document.getElementById('systemPauseBanner');
+    const detail = document.getElementById('pauseBannerDetail');
+    if (!banner) return;
+    if (systemState.is_paused) {
+        const who  = systemState.paused_by_name ? ` — paused by ${systemState.paused_by_name}` : '';
+        const when = systemState.paused_at ? ` at ${new Date(systemState.paused_at).toLocaleString()}` : '';
+        if (detail) detail.textContent = `All timers are frozen${who}${when}. Resume when factory operations restart.`;
+        banner.style.display = 'flex';
+    } else {
+        banner.style.display = 'none';
+    }
+}
+
+/** Update pause/resume button label and style */
+function updatePauseButton() {
+    const btn = document.getElementById('pauseAllBtn');
+    if (!btn) return;
+    if (systemState.is_paused) {
+        btn.innerHTML = '&#9654; Resume All Slots';
+        btn.className = 'btn btn-sm btn-resume';
+    } else {
+        btn.innerHTML = '&#9208; Pause All Slots';
+        btn.className = 'btn btn-sm btn-warning';
+    }
+}
+
+/** Handle click on the Pause / Resume All Slots button */
+async function handlePauseResumeAll() {
+    const action = systemState.is_paused ? 'resume' : 'pause';
+    const label  = systemState.is_paused ? 'Resume' : 'Pause';
+    if (!confirm(`Are you sure you want to ${label} ALL slots?\n\n` +
+        (action === 'pause'
+            ? 'This will freeze all running time counters. Use this on non-working days (e.g. Sundays).'
+            : 'This will restart all time counters from where they left off.'))) return;
+    try {
+        if (action === 'pause') {
+            await api.pauseSystem('Factory off-day pause');
+            showToast('System paused — all timers frozen.', 'warning');
         } else {
-            const stats = summary.stats;
-            document.getElementById('totalUploads').textContent = stats.total_uploads;
-            document.getElementById('activeTests').textContent = stats.active_tests;
-            document.getElementById('completedTests').textContent = stats.completed_tests;
-            document.getElementById('operatorsCount').textContent = stats.operators_count;
-            
-            if (stats.last_upload) {
-                document.getElementById('lastUploadTime').textContent = formatTime(stats.last_upload);
-            }
-            if (stats.next_scheduled_upload) {
-                document.getElementById('nextScheduledUpload').textContent = getTimeUntil(stats.next_scheduled_upload);
+            const res = await api.resumeSystem('Factory operations resumed');
+            const shifted = res && res.ecd_updated_count > 0
+                ? ` ECD shifted +${res.ecd_shifted_days}d on ${res.ecd_updated_count} test(s).`
+                : '';
+            showToast('System resumed — timers restarted.' + shifted, 'success');
+        }
+        // Re-fetch system state and life tests to get updated paused_seconds_since_sync
+        await fetchSystemState();
+        await loadLifeTests();
+    } catch (err) {
+        showToast('Error: ' + err.message, 'error');
+    }
+}
+
+async function loadLifeTests() {
+    const status = document.getElementById('filterStatus')?.value || '';
+    const grid = document.getElementById('testsGrid');
+    if (!grid) return;
+    try {
+        const res = await api.getLifeTests(status);
+        liveTestData = res.life_tests || [];
+        // Sync global system state from the list response (enriched by backend)
+        if (liveTestData.length > 0) {
+            const first = liveTestData[0];
+            if (first.system_is_paused !== undefined) {
+                systemState.is_paused = first.system_is_paused;
+                systemState.paused_at = first.system_paused_at || null;
+                updatePauseBanner();
+                updatePauseButton();
             }
         }
-        
-        loadActivityLog();
-    } catch (error) {
-        console.error('Error loading dashboard:', error);
-    }
-}
-
-async function loadActivityLog() {
-    try {
-        const activityLog = document.getElementById('activityLog');
-        activityLog.innerHTML = '';
-        
-        if (api.user.role === 'operator') {
-            const data = await api.getMyUploads(5);
-            
-            if (data.uploads.length === 0) {
-                activityLog.innerHTML = '<p class="empty-state">No uploads yet</p>';
-                return;
-            }
-            
-            data.uploads.forEach(upload => {
-                const item = document.createElement('div');
-                item.className = 'activity-item';
-                item.innerHTML = `
-                    <div class="activity-icon">📤</div>
-                    <div class="activity-text">
-                        <div class="activity-title">Uploaded: <strong>${upload.test_name}</strong></div>
-                        <div class="activity-time">${formatDateTime(upload.uploaded_at)}</div>
-                    </div>
-                `;
-                activityLog.appendChild(item);
-            });
-        } else {
-            const data = await api.getAllUploads(5);
-            
-            if (data.uploads.length === 0) {
-                activityLog.innerHTML = '<p class="empty-state">No uploads yet</p>';
-                return;
-            }
-            
-            data.uploads.forEach(upload => {
-                const item = document.createElement('div');
-                item.className = 'activity-item';
-                item.innerHTML = `
-                    <div class="activity-icon">📤</div>
-                    <div class="activity-text">
-                        <div class="activity-title"><strong>${upload.test_name}</strong> uploaded</div>
-                        <div class="activity-time">${formatDateTime(upload.uploaded_at)}</div>
-                    </div>
-                `;
-                activityLog.appendChild(item);
-            });
-        }
-    } catch (error) {
-        console.error('Error loading activity log:', error);
-    }
-}
-
-function formatInterval(minutes) {
-    const hours = Math.floor(minutes / 60);
-    const mins = minutes % 60;
-    if (hours > 0) {
-        return mins > 0 ? `${hours}h ${mins}m` : `${hours}h`;
-    }
-    return `${mins}m`;
-}
-
-// ==================== Section Data Loading ====================
-
-async function loadSectionData(section) {
-    switch (section) {
-        case 'upload':
-            loadUploadSection();
-            break;
-        case 'testing':
-            loadTestingSection();
-            break;
-        case 'reports':
-            loadReportsSection();
-            break;
-        case 'settings':
-            loadSettingsSection();
-            break;
-    }
-}
-
-async function loadUploadSection() {
-    try {
-        const interval = await api.getUploadInterval();
-        const intervalText = `Every ${formatInterval(interval.interval_minutes)}`;
-        const formattedInterval = formatInterval(interval.interval_minutes);
-        
-        // Safely update elements only if they exist
-        const deadlineEl = document.getElementById('deadlineInfo');
-        if (deadlineEl) deadlineEl.textContent = intervalText;
-        
-        const intervalEl = document.getElementById('uploadInterval');
-        if (intervalEl) intervalEl.textContent = formattedInterval;
-    } catch (error) {
-        console.error('Error loading upload interval:', error);
-    }
-}
-
-async function loadTestingSection() {
-    try {
-        // Load ON hours progress first
-        await loadOnHoursProgress();
-        
-        const data = await api.getActiveTesting();
-        const testList = document.getElementById('activeTestsList');
-        testList.innerHTML = '';
-        
-        if (data.active_tests.length === 0) {
-            testList.innerHTML = '<p class="empty-state">No active tests</p>';
+        if (liveTestData.length === 0) {
+            const isOp = api.user && (api.user.role === 'operator' || api.user.role === 'admin');
+            grid.innerHTML = `<div class="empty-state">
+                <div class="empty-state-icon">&#128202;</div>
+                <div>No life tests found.</div>
+                ${isOp ? '<div style="margin-top:12px"><button class="btn btn-primary" onclick="showSection(\'newTest\', document.getElementById(\'navNewTest\'))">+ Start a New Life Test</button></div>' : ''}
+            </div>`;
             return;
         }
-        
-        data.active_tests.forEach(test => {
-            const item = document.createElement('div');
-            item.className = 'test-item';
-            
-            const startTime = new Date(test.start_time);
-            const now = new Date();
-            const duration = Math.floor((now - startTime) / 60000);
-            
-            item.innerHTML = `
-                <div class="test-info">
-                    <div class="test-name">${test.test_name}</div>
-                    <div class="test-time">Started: ${formatTime(test.start_time)} | Duration: ${duration} min | Operator: ${test.users?.full_name || 'Unknown'}</div>
+        grid.innerHTML = liveTestData.map(renderTestCard).join('');
+    } catch(err) {
+        grid.innerHTML = `<div class="empty-state error">${err.message}</div>`;
+    }
+}
+
+function renderTestCard(test) {
+    const ls = test.last_sync;
+    const syncedAt = ls ? (ls.syncedAt || ls.synced_at) : null;
+    const hasSync = !!ls;
+    const isRunning = test.status === 'running';
+
+    const duty = test.on_minutes / (test.on_minutes + test.off_minutes) * 100;
+    const lastSyncStr = syncedAt ? fmtTime(syncedAt) : 'No sync';
+    const diffStr = ls && ls.difference_minutes != null ? 
+        (ls.difference_minutes >= 0 ? `+${ls.difference_minutes.toFixed(1)}m` : `${ls.difference_minutes.toFixed(1)}m`) : '--';
+
+    return `
+    <div class="test-card status-${esc(test.status)}" onclick="openTestDetail('${esc(test.id)}')">
+        <div class="test-card-inner">
+            <div class="test-card-header">
+                <div>
+                    <span class="test-label">${esc(test.test_label)}</span>
+                    <div class="test-product">${esc(test.product)}</div>
                 </div>
-                <div class="test-actions">
-                    <button class="btn btn-primary" onclick="handleEndTest('${test.id}')">End Test</button>
+                <span class="status-badge status-${esc(test.status)}">${esc(statusLabel(test.status))}</span>
+            </div>
+
+            <div class="test-card-counter" id="card-est-${test.id}">${hasSync ? fmtHMS(ls.machine_hours) : '--h --m --s'}</div>
+
+            <div class="test-card-cycle">
+                ${isRunning && hasSync ? `
+                    <span class="cycle-badge" id="card-state-${test.id}">--</span>
+                    <span class="cycle-remain-sm" id="card-remain-${test.id}">--:--</span>
+                ` : '<span style="color:var(--muted);font-size:12px;">' + (test.status === 'completed' ? 'Completed' : 'No sync') + '</span>'}
+            </div>
+
+            <div class="test-card-meta">
+                <div class="meta-item">
+                    <span class="meta-label">Operator</span>
+                    <span class="meta-val">${esc(test.operator_name) || '--'}</span>
                 </div>
-            `;
-            testList.appendChild(item);
-        });
-    } catch (error) {
-        console.error('Error loading testing section:', error);
-    }
+                <div class="meta-item">
+                    <span class="meta-label">Last Sync</span>
+                    <span class="meta-val">${lastSyncStr}</span>
+                </div>
+                <div class="meta-item">
+                    <span class="meta-label">Difference</span>
+                    <span class="meta-val diff">${diffStr}</span>
+                </div>
+                <div class="meta-item">
+                    <span class="meta-label">Next Sync</span>
+                    <span class="meta-val" id="card-next-${test.id}">${isRunning && hasSync ? '...' : '--'}</span>
+                </div>
+            </div>
+
+            <div class="test-card-progress">
+                <div class="progress-bar-wrap">
+                    <div class="progress-bar-fill" style="width:${hasSync ? Math.min(ls.machine_hours/test.target_hours*100,100).toFixed(1) : 0}%"></div>
+                </div>
+                <span class="progress-label">${hasSync ? fmtHM(ls.machine_hours) : '0h'} / ${test.target_hours}h &nbsp;·&nbsp; ${test.on_minutes}m ON / ${test.off_minutes}m OFF</span>
+            </div>
+        </div>
+    </div>`;
 }
 
-async function loadReportsSection() {
+async function openTestDetail(id) {
+    // Find in cache first, then fetch fresh
+    currentDetailTest = liveTestData.find(t => t.id === id) || null;
     try {
-        const data = await api.getAllUploads(100);
-        const table = document.getElementById('uploadsTable');
-        table.innerHTML = '';
-        
-        if (data.uploads.length === 0) {
-            table.innerHTML = '<tr class="empty-row"><td colspan="5" class="empty-state">No uploads yet</td></tr>';
-            return;
+        currentDetailTest = await api.getLifeTest(id);
+        // normalize synced_at alias
+        if (currentDetailTest.last_sync) {
+            currentDetailTest.last_sync.syncedAt = currentDetailTest.last_sync.synced_at;
         }
-        
-        data.uploads.forEach(upload => {
-            const row = document.createElement('tr');
-            row.innerHTML = `
-                <td>${upload.test_name}</td>
-                <td>${upload.operator_id}</td>
-                <td>${formatDateTime(upload.uploaded_at)}</td>
-                <td>${upload.description || '-'}</td>
-                <td>
-                    <button class="btn btn-primary" onclick="viewUploadDetails('${upload.id}')">View</button>
-                </td>
-            `;
-            table.appendChild(row);
-        });
-    } catch (error) {
-        console.error('Error loading reports section:', error);
+        liveTestData = liveTestData.map(t => t.id === id ? currentDetailTest : t);
+    } catch(err) {
+        showToast('Could not load test detail: ' + err.message, 'error');
+        return;
     }
-}
 
-async function loadSettingsSection() {
-    try {
-        // Update account info
-        const user = api.user;
-        document.getElementById('settingsName').textContent = user.full_name;
-        document.getElementById('settingsEmail').textContent = user.email;
-        document.getElementById('settingsRole').textContent = user.role.replace('_', ' ');
-        
-        // Show interval settings only for admin
-        if (api.user.role === 'admin') {
-            document.getElementById('uploadIntervalSettings').style.display = 'block';
-            const interval = await api.getUploadInterval();
-            document.getElementById('intervalInput').value = interval.interval_minutes;
-            updateIntervalPreview(interval.interval_minutes);
+    const test = currentDetailTest;
+    const user = api.user;
+    const isOp = user.role === 'operator' || user.role === 'admin';
+
+    // Switch to detail section
+    document.querySelectorAll('.section').forEach(s => s.classList.remove('active'));
+    document.getElementById('detailSection').classList.add('active');
+
+    setText('detailTitle', `${test.test_label} — ${test.product}`);
+    const badge = document.getElementById('detailStatusBadge');
+    if (badge) { badge.textContent = statusLabel(test.status); badge.className = `status-badge status-${test.status}`; }
+
+    // Meta info
+    const metaEl = document.getElementById('detailMeta');
+    if (metaEl) {
+        const duty = (test.on_minutes / (test.on_minutes + test.off_minutes) * 100).toFixed(0);
+        const isRunning = test.status === 'running';
+
+        // Completed Date: "TBD" if still running, actual date once completed
+        const completedDateStr = test.completed_at
+            ? fmtDateTime(test.completed_at)
+            : '<span style="color:var(--muted)">TBD</span>';
+
+        // ECD: date picker for operators on running tests; read-only otherwise
+        const ecdValue = test.ecd || '';
+        const ecdDisplay = isOp && isRunning
+            ? `<span class="ecd-picker-wrap">
+                   <input type="date" id="ecdInput" value="${esc(ecdValue)}"
+                          style="font-size:13px;border:1.5px solid var(--border);border-radius:6px;padding:3px 7px;">
+                   <button class="btn btn-sm btn-primary" style="margin-left:6px;"
+                           onclick="handleSaveECD()">Save</button>
+               </span>`
+            : (ecdValue
+                ? `<span class="meta-val">${esc(ecdValue)}</span>`
+                : `<span style="color:var(--muted)">Not set</span>`);
+
+        metaEl.innerHTML = `
+            <div class="meta-grid">
+                <div><span class="meta-label">Product</span><span class="meta-val">${esc(test.product)}</span></div>
+                <div><span class="meta-label">Operator</span><span class="meta-val">${esc(test.operator_name) || '--'}</span></div>
+                <div><span class="meta-label">Cycle</span><span class="meta-val">${test.on_minutes}m ON / ${test.off_minutes}m OFF</span></div>
+                <div><span class="meta-label">Duty</span><span class="meta-val">${duty}%</span></div>
+                <div><span class="meta-label">Target</span><span class="meta-val">${test.target_hours} h</span></div>
+                <div><span class="meta-label">Started</span><span class="meta-val">${fmtDateTime(test.created_at)}</span></div>
+                <div><span class="meta-label">Completed Date</span><span class="meta-val">${completedDateStr}</span></div>
+                <div><span class="meta-label">ECD</span>${ecdDisplay}</div>
+                <div><span class="meta-label">Paused Duration (total)</span><span class="meta-val">${fmtDuration(test.total_paused_seconds)}</span></div>
+            </div>`;
+    }
+
+    setText('detailTarget', test.target_hours);
+
+    // Last sync info
+    const ls = test.last_sync;
+    if (ls) {
+        const syncedAt = ls.synced_at;
+        setText('detailLastSyncTime', fmtDateTime(syncedAt));
+        setText('detailLastSyncMachine', fmtHM(ls.machine_hours) + ' (machine)');
+        const diffMin = ls.difference_minutes;
+        const diffEl = document.getElementById('detailDiff');
+        if (diffEl) {
+            diffEl.textContent = diffMin != null ? (diffMin >= 0 ? `+${diffMin.toFixed(1)} min` : `${diffMin.toFixed(1)} min`) : '--';
+            diffEl.className = `sync-info-val ${diffMin > 5 ? 'diff-pos' : diffMin < -5 ? 'diff-neg' : 'diff-ok'}`;
         }
-    } catch (error) {
-        console.error('Error loading settings:', error);
+    } else {
+        setText('detailLastSyncTime', 'No sync yet');
+        setText('detailLastSyncMachine', '--');
+        setText('detailDiff', '--');
+    }
+
+    // Show/hide action buttons based on role and status
+    const syncCard    = document.getElementById('syncFormCard');
+    const completeCard = document.getElementById('completeTestCard');
+    const deleteCard  = document.getElementById('deleteTestCard');
+    if (syncCard)    syncCard.style.display    = (isOp && test.status === 'running')   ? '' : 'none';
+    if (completeCard) completeCard.style.display = (isOp && test.status === 'running')  ? '' : 'none';
+    if (deleteCard)  deleteCard.style.display   = (isOp && test.status === 'completed') ? '' : 'none';
+    // Counter display — frozen for completed tests, live for running
+    if (test.status !== 'running') {
+        const frozenHours = ls ? ls.machine_hours : 0;
+        setText('detailCounter', fmtHMS(frozenHours));
+        const frozenPct = Math.min(frozenHours / test.target_hours * 100, 100);
+        setText('detailProgress', frozenPct.toFixed(1) + '%');
+        const fill = document.getElementById('detailProgressFill');
+        if (fill) fill.style.width = frozenPct.toFixed(1) + '%';
+        const stEl = document.getElementById('detailCycleState');
+        if (stEl) { stEl.textContent = 'Completed'; stEl.className = 'cycle-state-big completed'; }
+        setText('detailCycleRemain', '--');
+        setText('detailNextSync', '--');
+    }
+
+    const syncResultEl = document.getElementById('syncResult');
+    if (syncResultEl) syncResultEl.style.display = 'none';
+
+    // Load sync timeline
+    loadSyncTimeline(id);
+}
+
+async function loadSyncTimeline(id) {
+    const tl = document.getElementById('syncTimeline');
+    if (!tl) return;
+    try {
+        const res = await api.getSyncs(id);
+        const syncs = (res.syncs || []).slice().reverse(); // newest first
+        if (syncs.length === 0) { tl.innerHTML = '<p class="empty-state">No syncs recorded yet.</p>'; return; }
+        tl.innerHTML = syncs.map((s, i) => {
+            const diffStr = s.difference_minutes != null && i < syncs.length - 1
+                ? (s.difference_minutes >= 0
+                    ? `<span class="diff-pos">+${s.difference_minutes.toFixed(1)}m</span>`
+                    : `<span class="diff-neg">${s.difference_minutes.toFixed(1)}m</span>`)
+                : '';
+            return `
+            <div class="timeline-item">
+                <div class="timeline-dot ${i === 0 ? 'latest' : ''}"></div>
+                <div class="timeline-content">
+                    <div class="timeline-time">${fmtDateTime(s.synced_at)}</div>
+                    <div class="timeline-machine">Machine: <strong>${fmtHM(s.machine_hours)}</strong></div>
+                    ${s.estimated_hours != null ? `<div class="timeline-est">System est: ${fmtHM(s.estimated_hours)}</div>` : ''}
+                    ${diffStr ? `<div class="timeline-diff">Diff: ${diffStr}</div>` : ''}
+                    ${s.notes ? `<div class="timeline-note">${esc(s.notes)}</div>` : ''}
+                </div>
+            </div>`;
+        }).join('');
+    } catch(err) {
+        tl.innerHTML = '<p class="empty-state error">Could not load syncs.</p>';
     }
 }
 
-function updateIntervalPreview(minutes) {
-    const hours = Math.floor(minutes / 60);
-    const mins = minutes % 60;
-    const text = hours > 0 
-        ? (mins > 0 ? `${hours} hours and ${mins} minutes` : `${hours} hours`)
-        : `${mins} minutes`;
-    document.getElementById('previewInterval').textContent = text;
-}
+async function handleSync(e) {
+    e.preventDefault();
+    if (!currentDetailTest) return;
+    const h = parseInt(document.getElementById('syncHours').value, 10);
+    const m = parseInt(document.getElementById('syncMinutes').value, 10);
+    const notes = document.getElementById('syncNotes').value;
 
-// ==================== Form Handlers ====================
-
-async function handleDataUpload(event) {
-    event.preventDefault();
-    
-    const testName = document.getElementById('testName').value;
-    const description = document.getElementById('testDescription').value;
-    const cyclePattern = document.getElementById('cyclePattern').value;
-    const dataStr = document.getElementById('testData').value;
-    
     try {
-        // Parse JSON data
-        const data = JSON.parse(dataStr);
-        
-        // Add metadata
-        const uploadData = {
-            ...data,
-            cycle_pattern: cyclePattern,
-            upload_timestamp: new Date().toISOString()
-        };
-        
-        await api.uploadData(testName, description, uploadData);
-        
-        showStatus('uploadStatus', 'Data uploaded successfully and ON hours calculated!', 'success');
-        document.getElementById('uploadForm').reset();
-        
-        showToast('Upload successful! ON hours calculated.', 'success');
-        
-        // Reload activity log and ON hours progress
-        loadActivityLog();
-        loadOnHoursProgress();
-    } catch (error) {
-        if (error instanceof SyntaxError) {
-            showStatus('uploadStatus', 'Invalid JSON format', 'error');
-        } else {
-            showStatus('uploadStatus', error.message, 'error');
+        const res = await api.submitSync(currentDetailTest.id, h, m, notes);
+        const resultEl = document.getElementById('syncResult');
+        const diffMin = res.difference_minutes;
+        const diffStr = diffMin >= 0 ? `+${diffMin.toFixed(1)}` : `${diffMin.toFixed(1)}`;
+        if (resultEl) {
+            resultEl.innerHTML = `
+                <div class="sync-result-grid">
+                    <div><span>Machine:</span><strong>${fmtHM(res.machine_hours)}</strong></div>
+                    <div><span>System was:</span><strong>${fmtHM(res.system_estimated_hours)}</strong></div>
+                    <div><span>Difference:</span><strong class="${diffMin > 5 ? 'diff-pos' : diffMin < -5 ? 'diff-neg' : 'diff-ok'}">${diffStr} min</strong></div>
+                </div>`;
+            resultEl.style.display = '';
         }
-        showToast(error.message, 'error');
+        showToast('Sync recorded successfully!', 'success');
+        // Refresh detail view
+        e.target.reset();
+        await openTestDetail(currentDetailTest.id);
+    } catch(err) {
+        showToast('Sync failed: ' + err.message, 'error');
     }
 }
 
-async function loadOnHoursProgress() {
+async function handleCompleteTest() {
+    if (!currentDetailTest) return;
+    if (!confirm(`Mark "${currentDetailTest.test_label}" as completed?`)) return;
     try {
-        const response = await api.request('GET', '/uploads/on-hours');
-        const progress = response.progress;
-        
-        // Update display
-        document.getElementById('accumulatedOnHours').textContent = progress.cumulative_on_hours.toFixed(2);
-        document.getElementById('onHoursPercent').textContent = progress.progress_percent.toFixed(1);
-        document.getElementById('remainingOnHours').textContent = progress.remaining_hours.toFixed(2);
-        
-        const progressFill = document.getElementById('onHoursProgressFill');
-        progressFill.style.width = progress.progress_percent + '%';
-        
-        // Show congratulations if complete
-        if (progress.is_complete) {
-            showToast('🎉 Test target reached! Congratulations!', 'success');
+        await api.completeLifeTest(currentDetailTest.id);
+        showToast('Test marked as completed.', 'success');
+        await openTestDetail(currentDetailTest.id);
+    } catch(err) {
+        showToast(err.message, 'error');
+    }
+}
+
+async function handleDeleteTest() {
+    if (!currentDetailTest) return;
+    if (currentDetailTest.status !== 'completed') {
+        showToast('Only completed tests can be deleted.', 'error');
+        return;
+    }
+    const label = currentDetailTest.test_label;
+    if (!confirm(`Permanently delete all data for "${label}"?\n\nThis will remove the test, all sync records, and the timeline. This cannot be undone.`)) return;
+    try {
+        await api.deleteLifeTest(currentDetailTest.id);
+        currentDetailTest = null;
+        showToast(`"${label}" deleted successfully.`, 'success');
+        // Return to dashboard and refresh
+        showSection('dashboard', document.querySelector('.nav-item'));
+    } catch(err) {
+        showToast('Delete failed: ' + err.message, 'error');
+    }
+}
+
+async function handleSaveECD() {
+    if (!currentDetailTest) return;
+    const input = document.getElementById('ecdInput');
+    if (!input) return;
+    const ecdDate = input.value.trim();
+    try {
+        await api.setECD(currentDetailTest.id, ecdDate);
+        currentDetailTest.ecd = ecdDate;
+        showToast('ECD saved.', 'success');
+    } catch(err) {
+        showToast('Could not save ECD: ' + err.message, 'error');
+    }
+}
+
+// ==================== New Life Test ====================
+
+function applyPreset() {
+    const preset = document.getElementById('ntCyclePreset').value;
+    const customRow = document.getElementById('customCycle');
+    if (preset === 'custom') {
+        customRow.style.display = '';
+    } else {
+        customRow.style.display = 'none';
+        if (preset === 'ul') {
+            document.getElementById('ntOnMin').value  = 8;
+            document.getElementById('ntOffMin').value = 2;
+        } else if (preset === 'iec') {
+            document.getElementById('ntOnMin').value  = 14;
+            document.getElementById('ntOffMin').value = 0.5;
         }
-    } catch (error) {
-        console.error('Error loading ON hours progress:', error);
     }
 }
 
-async function handleStartTest(event) {
-    event.preventDefault();
-    
-    const testName = document.getElementById('testNameInput').value;
-    const targetHours = document.getElementById('testTargetHours').value;
-    const notes = document.getElementById('testNotesInput').value;
-    
+async function handleCreateTest(e) {
+    e.preventDefault();
+    const preset = document.getElementById('ntCyclePreset').value;
+    let onMin  = parseFloat(document.getElementById('ntOnMin').value)  || 8;
+    let offMin = parseFloat(document.getElementById('ntOffMin').value) || 2;
+    if (preset === 'ul')  { onMin = 8;    offMin = 2;   }
+    if (preset === 'iec') { onMin = 14;   offMin = 0.5; }
+
+    const initH = parseInt(document.getElementById('ntInitHours').value,   10) || 0;
+    const initM = parseInt(document.getElementById('ntInitMinutes').value,  10) || 0;
+
+    const payload = {
+        test_label:             document.getElementById('ntLabel').value.trim(),
+        product:                document.getElementById('ntProduct').value.trim(),
+        on_minutes:             onMin,
+        off_minutes:            offMin,
+        target_hours:           parseInt(document.getElementById('ntTarget').value, 10),
+        initial_machine_hours:  initH + initM / 60.0,
+        notes:                  document.getElementById('ntNotes').value.trim()
+    };
+
     try {
-        await api.startTesting(testName, notes);
-        
-        showToast('Test started! Target: ' + targetHours + ' hours', 'success');
-        document.getElementById('startTestForm').reset();
-        loadTestingSection();
-    } catch (error) {
-        showToast(error.message, 'error');
+        await api.createLifeTest(payload);
+        showToast(`Life test ${payload.test_label} created!`, 'success');
+        e.target.reset();
+        showSection('dashboard', document.querySelector('.nav-item'));
+    } catch(err) {
+        showToast('Error: ' + err.message, 'error');
     }
 }
 
-async function handleEndTest(sessionId) {
-    if (!confirm('Are you sure you want to end this test?')) return;
-    
+// ==================== Reports ====================
+
+async function loadReports() {
+    const tbody = document.getElementById('reportsTable');
+    if (!tbody) return;
     try {
-        await api.endTesting(sessionId);
-        showToast('Test ended!', 'success');
-        loadTestingSection();
-        loadActivityLog();
-    } catch (error) {
-        showToast(error.message, 'error');
+        const res = await api.getSyncQualityReport();
+        const rows = res.report || [];
+        if (rows.length === 0) { tbody.innerHTML = '<tr><td colspan="6" class="empty-state">No data yet.</td></tr>'; return; }
+        tbody.innerHTML = rows.map(r => `
+            <tr>
+                <td>${esc(r.test_label)}</td>
+                <td>${esc(r.product)}</td>
+                <td><span class="status-badge status-${esc(r.status)}">${esc(statusLabel(r.status))}</span></td>
+                <td>${r.total_syncs ?? 0}</td>
+                <td>${r.avg_diff_minutes != null ? r.avg_diff_minutes.toFixed(2) + ' min' : '--'}</td>
+                <td>${r.max_diff_minutes != null ? r.max_diff_minutes.toFixed(2) + ' min' : '--'}</td>
+            </tr>`).join('');
+    } catch(err) {
+        tbody.innerHTML = `<tr><td colspan="6" class="empty-state error">${err.message}</td></tr>`;
     }
 }
 
-async function handleIntervalUpdate(event) {
-    event.preventDefault();
-    
-    const interval = parseInt(document.getElementById('intervalInput').value);
-    
+// ==================== Settings ====================
+
+function loadSettings() {
+    const user = api.user;
+    setText('settingsName',  user.full_name || '--');
+    setText('settingsEmail', user.email     || '--');
+    setText('settingsRole',  user.role      || '--');
+    const card = document.getElementById('syncIntervalCard');
+    if (card) card.style.display = user.role === 'admin' ? '' : 'none';
+}
+
+async function handleIntervalUpdate(e) {
+    e.preventDefault();
+    const min = parseInt(document.getElementById('intervalInput').value, 10);
     try {
-        await api.setUploadInterval(interval);
-        showToast('Upload interval updated!', 'success');
-    } catch (error) {
-        showToast(error.message, 'error');
+        await api.setUploadInterval(min);
+        showToast('Interval updated.', 'success');
+    } catch(err) {
+        showToast(err.message, 'error');
     }
 }
 
-// ==================== Detail View ====================
+// ==================== Init ====================
 
-function viewUploadDetails(uploadId) {
-    const modal = document.getElementById('detailsModal');
-    
-    // Note: In a real app, you'd fetch the full details from the API
-    const body = document.getElementById('modalBody');
-    body.innerHTML = `
-        <p>Upload ID: ${uploadId}</p>
-        <p>This is a placeholder for detailed upload information.</p>
-    `;
-    
-    modal.classList.add('show');
-}
-
-// ==================== Initialize App ====================
-
-async function initializeApp() {
-    // Check if user is logged in
+(async () => {
     if (api.token && api.user) {
         try {
             await api.verifyToken();
             showDashboard();
-        } catch (error) {
-            // Token invalid, show login
-            showToast('Session expired. Please login again.', 'info');
+        } catch (_) {
+            localStorage.removeItem('auth_token');
+            localStorage.removeItem('user');
         }
     }
-}
-
-// Update interval preview when input changes
-document.addEventListener('DOMContentLoaded', () => {
-    const intervalInput = document.getElementById('intervalInput');
-    if (intervalInput) {
-        intervalInput.addEventListener('change', (e) => {
-            updateIntervalPreview(parseInt(e.target.value));
-        });
-    }
-    
-    // Initialize data builder for time series input
-    initializeDataBuilder();
-    
-    // Initialize app
-    initializeApp();
-});
-
-// Refresh dashboard periodically for access person
-setInterval(() => {
-    if (document.getElementById('dashboardView').style.display !== 'none' && 
-        document.getElementById('dashboardSection').classList.contains('active') &&
-        api.user && api.user.role !== 'operator') {
-        loadDashboard();
-    }
-}, 30000); // Every 30 seconds
-
-// ==================== Data Builder for Time Series ====================
-
-let builtDataPoints = [];
-
-function initializeDataBuilder() {
-    // Toggle data builder visibility
-    const toggleBtn = document.getElementById('toggleDataBuilder');
-    const builderDiv = document.getElementById('dataBuilder');
-    if (toggleBtn) {
-        toggleBtn.addEventListener('click', (e) => {
-            e.preventDefault();
-            builderDiv.style.display = builderDiv.style.display === 'none' ? 'block' : 'none';
-        });
-    }
-    
-    // Add data point button
-    const addBtn = document.getElementById('addDataPoint');
-    if (addBtn) {
-        addBtn.addEventListener('click', (e) => {
-            e.preventDefault();
-            addDataPoint();
-        });
-    }
-    
-    // Insert built data button
-    const insertBtn = document.getElementById('insertBuiltData');
-    if (insertBtn) {
-        insertBtn.addEventListener('click', (e) => {
-            e.preventDefault();
-            insertBuiltDataToTextarea();
-        });
-    }
-    
-    // Clear built data button
-    const clearBtn = document.getElementById('clearBuiltData');
-    if (clearBtn) {
-        clearBtn.addEventListener('click', (e) => {
-            e.preventDefault();
-            builtDataPoints = [];
-            renderDataPoints();
-        });
-    }
-    
-    // Insert sample data button
-    const sampleBtn = document.getElementById('insertSampleData');
-    if (sampleBtn) {
-        sampleBtn.addEventListener('click', (e) => {
-            e.preventDefault();
-            insertSampleData();
-        });
-    }
-    
-    // Allow Enter key to add data point
-    const timeInput = document.getElementById('builderTime');
-    if (timeInput) {
-        timeInput.addEventListener('keypress', (e) => {
-            if (e.key === 'Enter') {
-                e.preventDefault();
-                addDataPoint();
-            }
-        });
-    }
-}
-
-    function toggleDataBuilder() {
-        const builder = document.getElementById('dataBuilder');
-        if (builder) {
-            builder.style.display = builder.style.display === 'none' ? 'block' : 'none';
-        }
-    }
-
-    function clearBuiltDataFunc() {
-        builtDataPoints = [];
-        renderDataPoints();
-        showToast('Data points cleared', 'info');
-    }
-function addDataPoint() {
-    const timeInput = document.getElementById('builderTime');
-    const stateSelect = document.getElementById('builderState');
-    
-    if (!timeInput.value) {
-        showToast('Please enter a time', 'error');
-        return;
-    }
-    
-    const today = new Date().toISOString().split('T')[0];
-    const timestamp = `${today}T${timeInput.value}:00Z`;
-    const state = stateSelect.value;
-    
-    builtDataPoints.push({ timestamp, state });
-    
-    // Clear input
-    timeInput.value = '';
-    timeInput.focus();
-    
-    renderDataPoints();
-    showToast('Data point added', 'success');
-}
-
-function renderDataPoints() {
-    const listDiv = document.getElementById('dataPointsList');
-    if (builtDataPoints.length === 0) {
-        listDiv.innerHTML = '<div class="empty-data-list">No data points yet. Add one above!</div>';
-        return;
-    }
-    listDiv.innerHTML = builtDataPoints.map((point, idx) => {
-        const time = new Date(point.timestamp).toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', hour12: false });
-        const isOn = point.state === 'ON';
-        return `<div class="data-point-item">
-                    <span class="data-point-time">${time}</span>
-                    <span class="data-point-state ${isOn ? 'on' : 'off'}">${point.state}</span>
-                    <button type="button" class="data-point-remove" onclick="removeDataPoint(${idx})" title="Remove">&times;</button>
-                </div>`;
-    }).join('');
-}
-
-function removeDataPoint(index) {
-    builtDataPoints.splice(index, 1);
-    renderDataPoints();
-}
-
-function insertBuiltDataToTextarea() {
-    if (builtDataPoints.length === 0) {
-        showToast('Please add at least one data point', 'error');
-        return;
-    }
-    const jsonData = { data_points: builtDataPoints };
-    const textarea = document.getElementById('testData');
-    textarea.value = JSON.stringify(jsonData, null, 2);
-    const builder = document.getElementById('dataBuilder');
-    if (builder) builder.style.display = 'none';
-    showToast('Data inserted! Ready to upload.', 'success');
-    builtDataPoints = [];
-    renderDataPoints();
-}
-
-function insertSampleData() {
-    const now = new Date();
-    const sampleData = {
-        data_points: [
-            { timestamp: new Date(now.getTime() - 8 * 60000).toISOString(), state: 'ON' },
-            { timestamp: new Date(now.getTime() - 2 * 60000).toISOString(), state: 'OFF' },
-            { timestamp: new Date(now.getTime()).toISOString(), state: 'ON' }
-        ]
-    };
-    const textarea = document.getElementById('testData');
-    textarea.value = JSON.stringify(sampleData, null, 2);
-    showToast('Sample data inserted!', 'success');
-}
-
-function toggleDataBuilder() {
-    const builder = document.getElementById('dataBuilder');
-    if (builder) {
-        builder.style.display = builder.style.display === 'none' ? 'block' : 'none';
-    }
-}
-
-function clearBuiltDataFunc() {
-    builtDataPoints = [];
-    renderDataPoints();
-    showToast('Data points cleared', 'info');
-}
+})();

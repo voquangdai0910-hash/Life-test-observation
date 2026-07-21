@@ -1,367 +1,345 @@
-<!DOCTYPE html>
+﻿<!DOCTYPE html>
 <html lang="en">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Lab Data Upload System</title>
+    <title>Life Test Observation</title>
     <link rel="stylesheet" href="css/style.css">
 </head>
 <body>
-    <div id="app">
-        <!-- Login View -->
-        <div id="loginView" class="view">
-            <div class="login-container">
-                <div class="login-box">
-                    <h1>Lab Data Upload System</h1>
-                    <p class="subtitle">Laboratory Data Management & Testing Time Observation</p>
-                    
-                    <div class="tabs">
-                        <button class="tab-btn active" onclick="switchTab('login')">Login</button>
-                        <button class="tab-btn" onclick="switchTab('register')">Register</button>
-                    </div>
-                    
-                    <!-- Login Tab -->
-                    <div id="loginTab" class="tab-content active">
-                        <form id="loginForm" onsubmit="handleLogin(event)">
-                            <div class="form-group">
-                                <label for="loginEmail">Email</label>
-                                <input type="email" id="loginEmail" required>
-                            </div>
-                            <div class="form-group">
-                                <label for="loginPassword">Password</label>
-                                <input type="password" id="loginPassword" required>
-                            </div>
-                            <button type="submit" class="btn btn-primary">Login</button>
-                        </form>
-                    </div>
-                    
-                    <!-- Register Tab -->
-                    <div id="registerTab" class="tab-content">
-                        <form id="registerForm" onsubmit="handleRegister(event)">
-                            <div class="form-group">
-                                <label for="registerName">Full Name</label>
-                                <input type="text" id="registerName" required>
-                            </div>
-                            <div class="form-group">
-                                <label for="registerEmail">Email</label>
-                                <input type="email" id="registerEmail" required>
-                            </div>
-                            <div class="form-group">
-                                <label for="registerPassword">Password</label>
-                                <input type="password" id="registerPassword" required>
-                            </div>
-                            <div class="form-group">
-                                <label for="registerRole">Role</label>
-                                <select id="registerRole" required>
-                                    <option value="operator">Laboratory Operator</option>
-                                    <option value="access_person">Access Person</option>
-                                </select>
-                            </div>
-                            <button type="submit" class="btn btn-primary">Register</button>
-                        </form>
-                    </div>
+<div id="app">
+
+    <!-- ==================== LOGIN VIEW ==================== -->
+    <div id="loginView" class="view">
+        <div class="login-container">
+            <div class="login-box">
+                <div class="login-logo">&#9201;</div>
+                <h1>Life Test Observation</h1>
+                <p class="subtitle">Real-time machine testing time tracker</p>
+
+                <div class="tabs">
+                    <button class="tab-btn active" onclick="switchLoginTab('login', this)">Login</button>
+                    <button class="tab-btn" onclick="switchLoginTab('register', this)">Register</button>
+                </div>
+
+                <div id="loginTab" class="tab-content active">
+                    <form onsubmit="handleLogin(event)">
+                        <div class="form-group">
+                            <label>Email</label>
+                            <input type="email" id="loginEmail" required placeholder="you@lab.com">
+                        </div>
+                        <div class="form-group">
+                            <label>Password</label>
+                            <input type="password" id="loginPassword" required placeholder="password">
+                        </div>
+                        <button type="submit" class="btn btn-primary btn-full">Login</button>
+                    </form>
+                </div>
+
+                <div id="registerTab" class="tab-content">
+                    <form onsubmit="handleRegister(event)">
+                        <div class="form-group">
+                            <label>Full Name</label>
+                            <input type="text" id="registerName" required placeholder="John Doe">
+                        </div>
+                        <div class="form-group">
+                            <label>Email</label>
+                            <input type="email" id="registerEmail" required placeholder="you@lab.com">
+                        </div>
+                        <div class="form-group">
+                            <label>Password</label>
+                            <input type="password" id="registerPassword" required placeholder="password">
+                        </div>
+                        <button type="submit" class="btn btn-primary btn-full">Register</button>
+                    </form>
                 </div>
             </div>
         </div>
-        
-        <!-- Main Dashboard View -->
-        <div id="dashboardView" class="view" style="display: none;">
-            <nav class="navbar">
-                <div class="navbar-brand">
-                    <h1>Lab Data Upload System</h1>
+    </div>
+
+    <!-- ==================== DASHBOARD VIEW ==================== -->
+    <div id="dashboardView" class="view" style="display:none;">
+
+        <nav class="navbar">
+            <div class="navbar-brand">&#9201; Life Test Observation</div>
+            <div class="navbar-user">
+                <span id="navUserName"></span>
+                <span id="navUserRole" class="role-badge"></span>
+                <button id="pauseAllBtn" class="btn btn-sm btn-warning" onclick="handlePauseResumeAll()" style="display:none;">
+                    &#9208; Pause All Slots
+                </button>
+                <button class="btn btn-sm btn-outline" onclick="handleLogout()">Logout</button>
+            </div>
+        </nav>
+
+        <!-- System Pause Banner -->
+        <div id="systemPauseBanner" class="system-pause-banner" style="display:none;">
+            <span class="pause-banner-icon">&#9208;</span>
+            <strong>SYSTEM PAUSED &mdash; Factory Off Day</strong>
+            <span id="pauseBannerDetail">All timers are frozen. Resume when factory operations restart.</span>
+        </div>
+
+        <div class="layout">
+            <aside class="sidebar">
+                <nav>
+                    <a class="nav-item active" onclick="showSection('dashboard', this)"><span class="nav-icon">&#128202;</span> Dashboard</a>
+                    <a class="nav-item" id="navNewTest" onclick="showSection('newTest', this)" style="display:none;"><span class="nav-icon">&#10133;</span> New Life Test</a>
+                    <a class="nav-item" id="navReports" onclick="showSection('reports', this)" style="display:none;"><span class="nav-icon">&#128203;</span> Sync Reports</a>
+                    <a class="nav-item" id="navSettings" onclick="showSection('settings', this)" style="display:none;"><span class="nav-icon">&#9881;</span> Settings</a>
+                </nav>
+                <div class="sidebar-copyright">
+                    &copy; 2026 Mickey Vo &amp; Erek Tran<br>
+                    Life Test Observation
                 </div>
-                <div class="navbar-user">
-                    <span id="userName"></span>
-                    <span id="userRole"></span>
-                    <button class="btn btn-logout" onclick="handleLogout()">Logout</button>
-                </div>
-            </nav>
-            
-            <div class="container">
-                <!-- Sidebar Navigation -->
-                <aside class="sidebar">
-                    <nav class="nav-menu" id="navMenu">
-                        <a href="#" class="nav-item active" onclick="showSection('dashboard')">
-                            <span class="icon">📊</span> Dashboard
-                        </a>
-                        <a href="#" class="nav-item" id="uploadNavBtn" onclick="showSection('upload')" style="display: none;">
-                            <span class="icon">📤</span> Upload Data
-                        </a>
-                        <a href="#" class="nav-item" id="testingNavBtn" onclick="showSection('testing')" style="display: none;">
-                            <span class="icon">⏱️</span> Testing Time
-                        </a>
-                        <a href="#" class="nav-item" id="reportsNavBtn" onclick="showSection('reports')" style="display: none;">
-                            <span class="icon">📋</span> Upload History
-                        </a>
-                        <a href="#" class="nav-item" id="settingsNavBtn" onclick="showSection('settings')" style="display: none;">
-                            <span class="icon">⚙️</span> Settings
-                        </a>
-                    </nav>
-                </aside>
-                
-                <!-- Main Content -->
-                <main class="main-content">
-                    <!-- Dashboard Section -->
-                    <section id="dashboardSection" class="section active">
-                        <h2>Dashboard</h2>
-                        
-                        <div class="stats-grid" id="operatorStats" style="display: none;">
-                            <div class="stat-card">
-                                <div class="stat-value" id="myUploadsCount">0</div>
-                                <div class="stat-label">My Uploads</div>
-                            </div>
-                            <div class="stat-card">
-                                <div class="stat-value" id="uploadInterval">4h</div>
-                                <div class="stat-label">Upload Interval</div>
-                            </div>
-                            <div class="stat-card">
-                                <div class="stat-value" id="nextDeadline">--:--</div>
-                                <div class="stat-label">Next Upload Deadline</div>
-                            </div>
+            </aside>
+
+            <main class="main-content">
+
+                <!-- DASHBOARD -->
+                <section id="dashboardSection" class="section active">
+                    <div class="section-header">
+                        <h2>Life Tests</h2>
+                        <div style="display:flex;gap:8px;align-items:center;">
+                            <select id="filterStatus" onchange="loadLifeTests()" class="filter-select">
+                                <option value="">All</option>
+                                <option value="running" selected>Ongoing</option>
+                                <option value="completed">Completed</option>
+                            </select>
+                            <button class="btn btn-primary btn-sm" id="dashNewTestBtn"
+                                onclick="showSection('newTest', document.getElementById('navNewTest'))" style="display:none;">+ New Test</button>
                         </div>
-                        
-                        <div class="stats-grid" id="accessPersonStats" style="display: none;">
-                            <div class="stat-card">
-                                <div class="stat-value" id="totalUploads">0</div>
-                                <div class="stat-label">Total Uploads</div>
+                    </div>
+                    <div id="testsGrid" class="tests-grid">
+                        <p class="empty-state">Loading tests...</p>
+                    </div>
+                </section>
+
+                <!-- TEST DETAIL -->
+                <section id="detailSection" class="section">
+                    <div class="section-header">
+                        <button class="btn btn-sm btn-outline" onclick="showSection('dashboard', document.querySelector('.nav-item'))">Back</button>
+                        <h2 id="detailTitle">Test Detail</h2>
+                        <span id="detailStatusBadge" class="status-badge"></span>
+                    </div>
+
+                    <div class="detail-grid">
+                        <div class="detail-left">
+                            <div class="detail-card">
+                                <div class="detail-meta" id="detailMeta"></div>
                             </div>
-                            <div class="stat-card">
-                                <div class="stat-value" id="activeTests">0</div>
-                                <div class="stat-label">Active Tests</div>
-                            </div>
-                            <div class="stat-card">
-                                <div class="stat-value" id="completedTests">0</div>
-                                <div class="stat-label">Completed Tests</div>
-                            </div>
-                            <div class="stat-card">
-                                <div class="stat-value" id="operatorsCount">0</div>
-                                <div class="stat-label">Operators</div>
-                            </div>
-                            <div class="stat-card">
-                                <div class="stat-value" id="lastUploadTime">--</div>
-                                <div class="stat-label">Last Upload</div>
-                            </div>
-                            <div class="stat-card">
-                                <div class="stat-value" id="nextScheduledUpload">--</div>
-                                <div class="stat-label">Next Scheduled Upload</div>
-                            </div>
-                        </div>
-                        
-                        <div class="recent-activity">
-                            <h3>Recent Activity</h3>
-                            <div id="activityLog" class="activity-list">
-                                <p class="empty-state">No activity yet</p>
-                            </div>
-                        </div>
-                    </section>
-                    
-                    <!-- Upload Data Section -->
-                    <section id="uploadSection" class="section">
-                        <h2>Upload Test Data - Time Series</h2>
-                        <div class="upload-container">
-                            <form id="uploadForm" onsubmit="handleDataUpload(event)">
-                                <div class="form-group">
-                                    <label for="testName">Test Name *</label>
-                                    <input type="text" id="testName" required placeholder="e.g., Equipment Test Run 001">
+
+                            <div class="detail-card counter-card">
+                                <div class="counter-label">Estimated Testing Time</div>
+                                <div class="counter-value" id="detailCounter">--h --m --s</div>
+                                <div class="counter-sub">
+                                    <span>Target: <strong id="detailTarget">--</strong> h</span>
+                                    <span>Progress: <strong id="detailProgress">--%</strong></span>
                                 </div>
-                                <div class="form-group">
-                                    <label for="testDescription">Description</label>
-                                    <textarea id="testDescription" rows="3" placeholder="Test details, model info, etc..."></textarea>
+                                <div class="progress-bar-wrap">
+                                    <div class="progress-bar-fill" id="detailProgressFill" style="width:0%"></div>
                                 </div>
-                                <div class="form-group">
-                                    <label for="cyclePattern">Cycle Pattern *</label>
-                                    <select id="cyclePattern" required>
-                                        <option value="ul_8min_2min">UL: 8 min ON / 2 min OFF</option>
-                                        <option value="iec_14min_30sec">IEC: 14 min ON / 30 sec OFF</option>
-                                    </select>
-                                </div>
-                                <div class="form-group">
-                                    <div class="form-group-header">
-                                        <label for="testData">Time Series Data *</label>
-                                        <button type="button" class="btn-helper" onclick="toggleDataBuilder()" title="Show/hide data builder">📝 Builder</button>
-                                        <button type="button" class="btn-helper" onclick="insertSampleData()" title="Load example data">📋 Sample</button>
+                            </div>
+
+                            <div class="detail-card cycle-card">
+                                <div class="cycle-label">Machine Status</div>
+                                <div class="cycle-state-big" id="detailCycleState">No sync yet</div>
+                                <div class="cycle-remain-label">Remaining in phase</div>
+                                <div class="cycle-remain" id="detailCycleRemain">--:--</div>
+                            </div>
+
+                            <div class="detail-card sync-info-card">
+                                <div class="sync-info-row">
+                                    <div>
+                                        <div class="sync-info-label">Last Sync</div>
+                                        <div class="sync-info-val" id="detailLastSyncTime">--</div>
+                                        <div class="sync-info-machine" id="detailLastSyncMachine">--</div>
                                     </div>
-                                    
-                                    <div id="dataBuilder" class="data-builder" style="display: none;">
-                                        <div class="builder-header">📊 Easy Data Entry</div>
-                                        <div class="builder-content">
-                                            <div class="builder-row">
-                                                <label for="builderTime">Time (HH:MM)</label>
-                                                <input type="time" id="builderTime" placeholder="10:00">
-                                                <select id="builderState">
-                                                    <option value="ON">ON</option>
-                                                    <option value="OFF">OFF</option>
-                                                </select>
-                                                <button type="button" class="btn-small" onclick="addDataPoint()">+ Add</button>
-                                            </div>
-                                            <div id="dataPointsList" class="data-points-list"></div>
-                                            <button type="button" class="btn-small" onclick="insertBuiltDataToTextarea()">Insert Data</button>
-                                            <button type="button" class="btn-small btn-cancel" onclick="clearBuiltDataFunc()">Clear</button>
+                                    <div>
+                                        <div class="sync-info-label">Next Sync Due</div>
+                                        <div class="sync-info-val sync-countdown" id="detailNextSync">--</div>
+                                    </div>
+                                    <div>
+                                        <div class="sync-info-label">Last Difference</div>
+                                        <div class="sync-info-val" id="detailDiff">--</div>
+                                    </div>
+                                </div>
+                            </div>
+
+                            <div class="detail-card" id="syncFormCard" style="display:none;">
+                                <h3>Sync Machine Reading</h3>
+                                <p class="sync-form-hint">Enter the hours and minutes shown on the machine display.</p>
+                                <form onsubmit="handleSync(event)" class="sync-form">
+                                    <div class="sync-inputs">
+                                        <div class="form-group">
+                                            <label>Hours</label>
+                                            <input type="number" id="syncHours" min="0" required placeholder="356">
                                         </div>
+                                        <div class="sync-sep">h</div>
+                                        <div class="form-group">
+                                            <label>Minutes</label>
+                                            <input type="number" id="syncMinutes" min="0" max="59" required placeholder="48">
+                                        </div>
+                                        <div class="sync-sep">m</div>
                                     </div>
-                                    
-                                    <textarea id="testData" rows="10" required placeholder='{\n  "data_points": [\n    {"timestamp": "2026-06-23T10:00:00Z", "state": "ON"},\n    {"timestamp": "2026-06-23T10:08:00Z", "state": "OFF"},\n    {"timestamp": "2026-06-23T10:10:00Z", "state": "ON"}\n  ]\n}' class="json-input"></textarea>
-                                    <small class="format-info">📌 Format: Copy & paste JSON or use the builder above. Each entry needs a timestamp (ISO format) and state (ON/OFF)</small>
-                                </div>
-                                <div class="form-actions">
-                                    <button type="submit" class="btn btn-primary">Upload Data & Calculate ON Hours</button>
-                                    <button type="reset" class="btn btn-secondary">Clear</button>
-                                </div>
-                            </form>
-                            
-                            <div id="uploadStatus" class="status-message" style="display: none;"></div>
-                            
-                            <div class="upload-info">
-                                <h4>Upload Guidelines</h4>
-                                <p><strong>Upload Frequency:</strong> Every 4 hours to minimize counting drift</p>
-                                <p><strong>Next Upload Deadline:</strong> <span id="deadlineInfo">Loading...</span></p>
-                                <p><strong>Data Format:</strong> Time series with ON/OFF state transitions (supports 8min/2min and 14min/30sec patterns)</p>
-                                <h4>Recent Upload Analysis</h4>
-                                <div id="uploadAnalysis" class="analysis-box"></div>
+                                    <div class="form-group">
+                                        <label>Notes (optional)</label>
+                                        <input type="text" id="syncNotes" placeholder="Any observation...">
+                                    </div>
+                                    <button type="submit" class="btn btn-primary">Sync</button>
+                                </form>
+                                <div id="syncResult" class="sync-result" style="display:none;"></div>
                             </div>
-                        </div>
-                    </section>
-                    
-                    <!-- Testing Time Section -->
-                    <section id="testingSection" class="section">
-                        <h2>Testing Time Management</h2>
-                        
-                        <div class="on-hours-summary">
-                            <h3>Accumulated ON Hours</h3>
-                            <div class="on-hours-card">
-                                <div class="on-hours-display">
-                                    <div class="on-hours-value" id="accumulatedOnHours">0.00</div>
-                                    <div class="on-hours-label">Total ON Hours</div>
-                                </div>
-                                <div class="on-hours-progress">
-                                    <div class="progress-info">
-                                        <span>Target: <strong id="targetOnHours">468</strong> hours</span>
-                                        <span>Progress: <strong id="onHoursPercent">0.0</strong>%</span>
+
+                            <div id="completeTestCard" style="display:none;margin-top:12px;">
+                                <button class="btn btn-danger btn-full" onclick="handleCompleteTest()">Mark Test as Completed</button>
+                            </div>
+
+                            <div id="deleteTestCard" style="display:none;margin-top:12px;">
+                                <div class="delete-card">
+                                    <div class="delete-card-info">
+                                        <strong>Delete All Data</strong>
+                                        <span>Permanently removes all sync records, timeline, and test metadata. Cannot be undone.</span>
                                     </div>
-                                    <div class="progress-bar">
-                                        <div class="progress-fill" id="onHoursProgressFill" style="width: 0%"></div>
-                                    </div>
-                                    <div class="progress-detail">
-                                        <span id="remainingOnHours">468.00</span> hours remaining
-                                    </div>
+                                    <button class="btn btn-danger" onclick="handleDeleteTest()">Delete Data</button>
                                 </div>
                             </div>
                         </div>
-                        
-                        <div class="testing-controls">
-                            <h3>Start New Test</h3>
-                            <form id="startTestForm" onsubmit="handleStartTest(event)">
+
+                        <div class="detail-right">
+                            <div class="detail-card">
+                                <h3>Sync Timeline</h3>
+                                <div id="syncTimeline" class="sync-timeline">
+                                    <p class="empty-state">No syncs yet</p>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </section>
+
+                <!-- NEW LIFE TEST -->
+                <section id="newTestSection" class="section">
+                    <div class="section-header"><h2>New Life Test</h2></div>
+                    <div class="form-card">
+                        <form onsubmit="handleCreateTest(event)">
+                            <div class="form-row">
                                 <div class="form-group">
-                                    <label for="testNameInput">Test Name *</label>
-                                    <input type="text" id="testNameInput" required placeholder="Enter test name">
+                                    <label>Test ID *</label>
+                                    <input type="text" id="ntLabel" required placeholder="LT001">
+                                    <small>Must be unique (e.g. LT001, LT002...)</small>
                                 </div>
                                 <div class="form-group">
-                                    <label for="testTargetHours">Target ON Hours</label>
-                                    <select id="testTargetHours">
+                                    <label>Product / Model *</label>
+                                    <input type="text" id="ntProduct" required placeholder="IW4170">
+                                </div>
+                            </div>
+
+                            <div class="form-row">
+                                <div class="form-group">
+                                    <label>Target ON Hours</label>
+                                    <select id="ntTarget">
                                         <option value="468">468 hours</option>
                                         <option value="500">500 hours</option>
+                                        <option value="1000">1000 hours</option>
                                     </select>
                                 </div>
                                 <div class="form-group">
-                                    <label for="testNotesInput">Notes</label>
-                                    <textarea id="testNotesInput" rows="3" placeholder="Any additional notes..."></textarea>
-                                </div>
-                                <button type="submit" class="btn btn-primary">Start Test Session</button>
-                            </form>
-                        </div>
-                        
-                        <div class="active-tests">
-                            <h3>Active Tests</h3>
-                            <div id="activeTestsList" class="test-list">
-                                <p class="empty-state">No active tests</p>
-                            </div>
-                        </div>
-                    </section>
-                    
-                    <!-- Upload History/Reports Section -->
-                    <section id="reportsSection" class="section">
-                        <h2>Upload History</h2>
-                        <div class="reports-container">
-                            <div class="filters">
-                                <input type="text" id="searchFilter" placeholder="Search by test name..." class="filter-input">
-                                <select id="dateFilter" class="filter-select">
-                                    <option value="all">All Time</option>
-                                    <option value="today">Today</option>
-                                    <option value="week">Last 7 Days</option>
-                                    <option value="month">Last 30 Days</option>
-                                </select>
-                            </div>
-                            
-                            <table class="data-table">
-                                <thead>
-                                    <tr>
-                                        <th>Test Name</th>
-                                        <th>Uploaded By</th>
-                                        <th>Upload Time</th>
-                                        <th>Description</th>
-                                        <th>Actions</th>
-                                    </tr>
-                                </thead>
-                                <tbody id="uploadsTable">
-                                    <tr class="empty-row">
-                                        <td colspan="5" class="empty-state">No uploads yet</td>
-                                    </tr>
-                                </tbody>
-                            </table>
-                        </div>
-                    </section>
-                    
-                    <!-- Settings Section -->
-                    <section id="settingsSection" class="section">
-                        <h2>Settings</h2>
-                        <div class="settings-container">
-                            <div class="settings-section" id="uploadIntervalSettings" style="display: none;">
-                                <h3>Upload Interval Configuration</h3>
-                                <p class="section-description">Set the interval at which operators must upload test data</p>
-                                
-                                <form id="intervalForm" onsubmit="handleIntervalUpdate(event)">
-                                    <div class="form-group">
-                                        <label for="intervalInput">Interval (minutes)</label>
-                                        <input type="number" id="intervalInput" min="1" max="1440" required>
-                                        <small>Min: 1 min, Max: 24 hours (1440 min)</small>
-                                    </div>
-                                    <div id="intervalPreview" class="preview-box">
-                                        <p>This will require uploads every <strong id="previewInterval">4 hours and 0 minutes</strong></p>
-                                    </div>
-                                    <button type="submit" class="btn btn-primary">Update Interval</button>
-                                </form>
-                            </div>
-                            
-                            <div class="settings-section">
-                                <h3>Account Information</h3>
-                                <div class="account-info">
-                                    <p><strong>Name:</strong> <span id="settingsName">--</span></p>
-                                    <p><strong>Email:</strong> <span id="settingsEmail">--</span></p>
-                                    <p><strong>Role:</strong> <span id="settingsRole">--</span></p>
+                                    <label>Cycle Pattern</label>
+                                    <select id="ntCyclePreset" onchange="applyPreset()">
+                                        <option value="ul">UL  8 min ON / 2 min OFF</option>
+                                        <option value="iec">IEC 14 min ON / 30 sec OFF</option>
+                                        <option value="custom">Custom...</option>
+                                    </select>
                                 </div>
                             </div>
-                        </div>
-                    </section>
-                </main>
-            </div>
+
+                            <div class="form-row" id="customCycle" style="display:none;">
+                                <div class="form-group">
+                                    <label>ON (minutes)</label>
+                                    <input type="number" id="ntOnMin" min="0.1" step="0.1" value="8">
+                                </div>
+                                <div class="form-group">
+                                    <label>OFF (minutes)</label>
+                                    <input type="number" id="ntOffMin" min="0.1" step="0.1" value="2">
+                                </div>
+                            </div>
+
+                            <div class="form-row">
+                                <div class="form-group">
+                                    <label>Initial Machine Reading (hours) *</label>
+                                    <input type="number" id="ntInitHours" min="0" value="0" required placeholder="0">
+                                </div>
+                                <div class="form-group">
+                                    <label>Initial Machine Reading (minutes)</label>
+                                    <input type="number" id="ntInitMinutes" min="0" max="59" value="0" placeholder="0">
+                                </div>
+                            </div>
+
+                            <div class="form-group">
+                                <label>Notes</label>
+                                <textarea id="ntNotes" rows="2" placeholder="Product details, test conditions..."></textarea>
+                            </div>
+
+                            <div class="form-actions">
+                                <button type="submit" class="btn btn-primary">Start Life Test</button>
+                                <button type="reset" class="btn btn-outline">Clear</button>
+                            </div>
+                        </form>
+                    </div>
+                </section>
+
+                <!-- REPORTS -->
+                <section id="reportsSection" class="section">
+                    <div class="section-header"><h2>Sync Quality Report</h2></div>
+                    <div class="table-card">
+                        <table class="data-table">
+                            <thead>
+                                <tr>
+                                    <th>Test ID</th>
+                                    <th>Product</th>
+                                    <th>Status</th>
+                                    <th>Total Syncs</th>
+                                    <th>Avg Difference</th>
+                                    <th>Max Difference</th>
+                                </tr>
+                            </thead>
+                            <tbody id="reportsTable">
+                                <tr><td colspan="6" class="empty-state">Loading...</td></tr>
+                            </tbody>
+                        </table>
+                    </div>
+                </section>
+
+                <!-- SETTINGS -->
+                <section id="settingsSection" class="section">
+                    <div class="section-header"><h2>Settings</h2></div>
+                    <div class="form-card">
+                        <h3>Account</h3>
+                        <p><strong>Name:</strong> <span id="settingsName">--</span></p>
+                        <p><strong>Email:</strong> <span id="settingsEmail">--</span></p>
+                        <p><strong>Role:</strong> <span id="settingsRole">--</span></p>
+                    </div>
+                    <div class="form-card" id="syncIntervalCard" style="display:none;margin-top:16px;">
+                        <h3>Sync Interval Reminder</h3>
+                        <form onsubmit="handleIntervalUpdate(event)">
+                            <div class="form-group">
+                                <label>Reminder interval (minutes)</label>
+                                <input type="number" id="intervalInput" min="1" max="1440" value="240">
+                                <small>Default: 240 min (4 hours)</small>
+                            </div>
+                            <button type="submit" class="btn btn-primary">Save</button>
+                        </form>
+                    </div>
+                </section>
+
+            </main>
         </div>
     </div>
-    
-    <!-- Modal for viewing upload details -->
-    <div id="detailsModal" class="modal" onclick="closeModal(event)">
-        <div class="modal-content" onclick="event.stopPropagation()">
-            <span class="close" onclick="closeModal()">&times;</span>
-            <h2 id="modalTitle">Upload Details</h2>
-            <div id="modalBody">
-                <!-- Populated dynamically -->
-            </div>
-        </div>
-    </div>
-    
-    <!-- Notification Toast -->
-    <div id="toast" class="toast" style="display: none;"></div>
-    
-    <script src="js/api.js?v=100"></script>
-    <script src="js/app.js?v=100"></script>
+</div>
+
+<div id="toast" class="toast" style="display:none;"></div>
+
+<script src="js/api.js?v=304"></script>
+<script src="js/app.js?v=304"></script>
 </body>
-    </html>
+</html>
+

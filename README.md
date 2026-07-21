@@ -35,39 +35,32 @@ This system addresses the challenge of manual data uploads in laboratory environ
 - Upload tracking with deadlines
 - Operator activity monitoring
 
-✅ **Supabase Integration**
-- Secure PostgreSQL database
-- Built-in authentication
-- Row-Level Security (RLS) policies
-- Scalable and reliable infrastructure
+✅ **Local SQLite Database**
+- Zero-config: the database file is created automatically on first run
+- No external database or account required
+- bcrypt-hashed passwords and JWT authentication
 
 ## Quick Start
 
 ### 1. Prerequisites
 - Python 3.9+
-- Supabase account (free at https://supabase.com)
 - Modern web browser
 
 ### 2. Clone and Setup
 ```bash
 cd lab-data-upload
 cp .env.example backend/.env
-# Edit backend/.env with your Supabase credentials
+# Optionally set a strong SECRET_KEY in backend/.env:
+#   python -c "import secrets; print(secrets.token_urlsafe(64))"
 
 python -m venv venv
 source venv/bin/activate  # On Windows: venv\Scripts\activate
 pip install -r requirements.txt
 ```
 
-### 3. Setup Database
-1. Go to Supabase SQL Editor
-2. Copy contents of `database_schema.sql`
-3. Run in SQL Editor
-4. Verify tables are created
-
-### 4. Start Application
+### 3. Start Application
 ```bash
-# Terminal 1 - Backend API
+# Terminal 1 - Backend API (creates backend/local_database.db on first run)
 cd backend
 python main.py
 
@@ -80,30 +73,26 @@ Access the app at: http://localhost:8001
 
 For detailed setup instructions, see [SETUP.md](SETUP.md)
 
-## Demo Credentials
+## User Accounts
 
-After setup, create test users:
+Register from the login screen to create a **Laboratory Operator** account
+(self-registration always creates an operator).
 
-**Laboratory Operator**
-- Email: operator@lab.com
-- Password: Test123!@
-- Role: operator
+To grant the elevated **access_person** or **admin** roles, update the local
+database directly — for example:
 
-**Access Person**
-- Email: access@lab.com
-- Password: Test123!@
-- Role: access_person
-
-**Admin**
-- Email: admin@lab.com
-- Password: Test123!@
-- Role: admin
+```bash
+cd backend
+python -c "from database import db; import sqlite3; c=db.get_connection(); \
+c.execute(\"UPDATE users SET role='admin' WHERE email=?\", ('you@lab.com',)); \
+c.commit(); c.close(); print('done')"
+```
 
 ## Architecture
 
 ### Backend (FastAPI)
 - RESTful API with JWT authentication
-- Supabase database integration
+- Local SQLite database (via the `sqlite3` standard library)
 - Role-based access control
 - Async/await support
 
@@ -113,17 +102,18 @@ After setup, create test users:
 - Tab-based navigation
 - Modal dialogs for details
 
-### Database (PostgreSQL via Supabase)
+### Database (SQLite)
 - Users with role management
 - Data uploads tracking
 - Testing sessions monitoring
-- Upload interval configuration
+- Life tests, sync records, and system pause logs
+- Tables are created automatically at startup (`init_db`)
 
 ## API Endpoints
 
 ```
 Authentication:
-  POST   /api/auth/register        - Register new user
+  POST   /api/auth/register        - Register new user (always operator)
   POST   /api/auth/login           - Login
   GET    /api/auth/verify          - Verify token
 
@@ -155,9 +145,11 @@ lab-data-upload/
 │   ├── main.py              # FastAPI application & routes
 │   ├── models.py            # Pydantic data models
 │   ├── config.py            # Configuration management
-│   ├── database.py          # Supabase database handler
-│   ├── auth.py              # Authentication utilities
-│   └── __pycache__/         # Python cache
+│   ├── database.py          # Local SQLite database handler
+│   ├── security.py          # Password hashing (bcrypt)
+│   ├── auth.py              # Authentication utilities (JWT)
+│   ├── cycle_calculator.py  # ON-hours cycle analysis
+│   └── local_database.db    # SQLite data file (auto-created, gitignored)
 ├── frontend/
 │   ├── index.html           # Main application
 │   ├── css/
@@ -167,7 +159,6 @@ lab-data-upload/
 │       └── app.js           # UI logic & handlers
 ├── .env.example             # Environment variables template
 ├── requirements.txt         # Python dependencies
-├── database_schema.sql      # Database setup
 ├── SETUP.md                 # Detailed setup guide
 └── README.md                # This file
 ```
@@ -177,18 +168,16 @@ lab-data-upload/
 Edit `backend/.env`:
 
 ```env
-# Supabase
-SUPABASE_URL=your-url
-SUPABASE_KEY=your-key
-SUPABASE_SERVICE_KEY=your-service-key
+# Security
+SECRET_KEY=your-secure-secret-key   # generate a strong random value
+DEBUG=False                         # True only for local debugging
 
 # Upload interval in minutes
 DEFAULT_UPLOAD_INTERVAL=240  # 4 hours
-
-# Security
-SECRET_KEY=your-secure-secret-key
-DEBUG=False  # In production
 ```
+
+The SQLite database lives at `backend/local_database.db` and needs no
+configuration. Delete that file to reset all data.
 
 ## Customization
 
@@ -203,50 +192,49 @@ DEBUG=False  # In production
 
 ### Add More Features
 - Add routes in `backend/main.py`
-- Update database schema in `database_schema.sql`
+- Update the schema in `backend/database.py` (`init_db`)
 - Add UI sections in `frontend/index.html`
 
 ## Deployment
 
+### Docker
+```bash
+docker compose up --build
+```
+
 ### Heroku
-1. Create Procfile
-2. Set environment variables with `heroku config:set`
+1. Use the included `Procfile`
+2. Set environment variables with `heroku config:set` (at minimum `SECRET_KEY`)
 3. Deploy with `git push heroku main`
 
-### Docker
-See `Dockerfile` example in [SETUP.md](SETUP.md)
-
-### Cloud Platforms
-- AWS App Runner / Lambda
-- Google Cloud Run
-- Azure App Service
+Note: SQLite is stored on the local filesystem. On ephemeral platforms
+(Heroku dynos, Cloud Run) data does not persist across restarts — mount a
+persistent volume or migrate to a managed database for production use.
 
 ## Security
 
-- ✅ JWT authentication with Supabase
-- ✅ Row-Level Security (RLS) policies
-- ✅ HTTPS/SSL ready
+- ✅ bcrypt-hashed passwords (legacy hashes upgraded on next login)
+- ✅ JWT authentication (HS256) with a required secret key
+- ✅ Self-registration restricted to the operator role
 - ✅ CORS protection
 - ✅ Environment variable secrets
 
-**Important**: Change `SECRET_KEY` in production!
+**Important**: Set a strong `SECRET_KEY` and `DEBUG=False` in production.
 
 ## Troubleshooting
 
 **Can't login?**
-- Verify Supabase credentials in `.env`
-- Check user exists in Supabase Auth
-- Check browser console for errors
+- Confirm the account was registered (self-registration creates operators)
+- Check the browser console for errors
+- Delete `backend/local_database.db` to start fresh (destroys all data)
 
 **API not responding?**
-- Ensure backend is running: `python main.py`
+- Ensure the backend is running: `python main.py`
 - Check port 8000 is available
-- Verify SUPABASE_URL is correct
 
 **Database errors?**
-- Run `database_schema.sql` in Supabase SQL Editor
-- Verify RLS policies are enabled
-- Check SUPABASE_SERVICE_KEY is correct
+- The schema is created automatically; if the file is corrupt, delete
+  `backend/local_database.db` and restart the backend
 
 See [SETUP.md](SETUP.md) for more troubleshooting.
 
@@ -256,9 +244,9 @@ See [SETUP.md](SETUP.md) for more troubleshooting.
 |-----------|-----------|
 | Backend | Python 3.9+, FastAPI |
 | Frontend | HTML5, CSS3, JavaScript |
-| Database | PostgreSQL (Supabase) |
-| Auth | Supabase Auth, JWT |
-| Deployment | Docker, Heroku, Cloud Run |
+| Database | SQLite (standard library) |
+| Auth | JWT (PyJWT), bcrypt |
+| Deployment | Docker, Heroku |
 
 ## License
 
@@ -267,12 +255,11 @@ MIT License - Feel free to use and modify
 ## Support
 
 - 📖 See [SETUP.md](SETUP.md) for detailed documentation
-- 🔗 [Supabase Documentation](https://supabase.com/docs)
 - 🚀 [FastAPI Documentation](https://fastapi.tiangolo.com)
 
 ---
 
 **Version**: 1.0.0  
-**Last Updated**: June 2026  
+**Last Updated**: July 2026  
 **Status**: Production Ready ✅
 # Life-test-observation

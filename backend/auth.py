@@ -1,7 +1,7 @@
 from fastapi import Depends, HTTPException, status
 from fastapi.security import HTTPBearer
 from datetime import datetime, timedelta, timezone
-from jose import JWTError, jwt
+import jwt
 from config import SECRET_KEY
 from typing import Optional
 
@@ -48,7 +48,7 @@ def verify_token(token: str) -> TokenData:
         
         token_data = TokenData(email=email, user_id=user_id, role=role)
         return token_data
-    except JWTError:
+    except jwt.PyJWTError:
         raise credentials_exception
 
 async def get_current_user(credentials = Depends(security)) -> TokenData:

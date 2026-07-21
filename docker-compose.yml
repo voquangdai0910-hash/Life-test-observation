@@ -1,7 +1,7 @@
 version: '3.8'
 
 services:
-  # FastAPI Backend
+  # FastAPI Backend (uses local SQLite — no external database)
   backend:
     build:
       context: .
@@ -9,17 +9,13 @@ services:
     ports:
       - "8000:8000"
     environment:
-      - SUPABASE_URL=${SUPABASE_URL}
-      - SUPABASE_KEY=${SUPABASE_KEY}
-      - SUPABASE_SERVICE_KEY=${SUPABASE_SERVICE_KEY}
       - SECRET_KEY=${SECRET_KEY}
-      - DEBUG=${DEBUG:-True}
+      - DEBUG=${DEBUG:-False}
       - DEFAULT_UPLOAD_INTERVAL=${DEFAULT_UPLOAD_INTERVAL:-240}
     volumes:
+      # Bind-mount persists the SQLite file (backend/local_database.db)
       - ./backend:/app/backend
     command: python -m uvicorn main:app --host 0.0.0.0 --port 8000 --reload
-    depends_on:
-      - nginx
     networks:
       - lab-network
 
@@ -40,6 +36,3 @@ services:
 networks:
   lab-network:
     driver: bridge
-
-volumes:
-  backend-data:

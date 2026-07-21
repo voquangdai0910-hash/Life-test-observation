@@ -1,15 +1,11 @@
-// API Configuration - Dynamic URL detection for local and GitHub Codespaces
+﻿// Dynamic API base URL detection
 function getAPIBaseURL() {
     const host = window.location.hostname;
-    const protocol = window.location.protocol;
-    
-    // GitHub Codespaces tunnel (port 8000 for API)
+    const proto = window.location.protocol;
     if (host.includes('.app.github.dev')) {
-        return `${protocol}//${host.replace('-8001.', '-8000.')}/api`;
+        return `${proto}//${host.replace('-8081.', '-8000.').replace('-8001.', '-8000.')}/api`;
     }
-    
-    // Local development
-    return `${protocol}//localhost:8000/api`;
+    return `${proto}//localhost:8000/api`;
 }
 
 const API_BASE_URL = getAPIBaseURL();
@@ -19,148 +15,78 @@ class LabDataAPI {
         this.token = localStorage.getItem('auth_token') || null;
         this.user = JSON.parse(localStorage.getItem('user') || 'null');
     }
-    
-    setToken(token) {
-        this.token = token;
-        localStorage.setItem('auth_token', token);
+
+    setToken(token) { this.token = token; localStorage.setItem('auth_token', token); }
+    setUser(user) { this.user = user; localStorage.setItem('user', JSON.stringify(user)); }
+
+    getHeaders(auth = true) {
+        const h = { 'Content-Type': 'application/json' };
+        if (auth && this.token) h['Authorization'] = `Bearer ${this.token}`;
+        return h;
     }
-    
-    setUser(user) {
-        this.user = user;
-        localStorage.setItem('user', JSON.stringify(user));
-    }
-    
-    getHeaders(includeAuth = true) {
-        const headers = {
-            'Content-Type': 'application/json',
-        };
-        
-        if (includeAuth && this.token) {
-            headers['Authorization'] = `Bearer ${this.token}`;
-        }
-        
-        return headers;
-    }
-    
-    async request(method, endpoint, data = null, includeAuth = true) {
+
+    async request(method, endpoint, data = null, auth = true) {
         try {
-            const options = {
-                method,
-                headers: this.getHeaders(includeAuth),
-            };
-            
-            if (data) {
-                options.body = JSON.stringify(data);
-            }
-            
-            const response = await fetch(`${API_BASE_URL}${endpoint}`, options);
-            
-            if (!response.ok) {
-                if (response.status === 401) {
-                    // Clear auth and redirect to login
+            const opts = { method, headers: this.getHeaders(auth) };
+            if (data) opts.body = JSON.stringify(data);
+            const res = await fetch(`${API_BASE_URL}${endpoint}`, opts);
+            if (!res.ok) {
+                if (res.status === 401) {
                     localStorage.removeItem('auth_token');
                     localStorage.removeItem('user');
                     window.location.reload();
                 }
-                
-                const error = await response.json();
-                throw new Error(error.detail || `HTTP ${response.status}`);
+                const err = await res.json();
+                throw new Error(err.detail || `HTTP ${res.status}`);
             }
-            
-            return await response.json();
-        } catch (error) {
-            console.error('API Error:', error);
-            throw error;
+            return await res.json();
+        } catch (e) {
+            console.error('API Error:', e);
+            throw e;
         }
     }
-    
-    // ==================== Authentication ====================
-    
-    async register(email, password, fullName, role) {
-        return this.request('POST', '/auth/register', {
-            email,
-            password,
-            full_name: fullName,
-            role
-        }, false);
+
+    // ── Auth ──
+    register(email, password, fullName) {
+        return this.request('POST', '/auth/register', { email, password, full_name: fullName }, false);
     }
-    
-    async login(email, password) {
-        return this.request('POST', '/auth/login', {
-            email,
-            password
-        }, false);
+    login(email, password) {
+        return this.request('POST', '/auth/login', { email, password }, false);
     }
-    
-    async verifyToken() {
-        return this.request('GET', '/auth/verify');
+    verifyToken() { return this.request('GET', '/auth/verify'); }
+
+    // ── Life Tests ──
+    createLifeTest(payload) { return this.request('POST', '/life-tests', payload); }
+    getLifeTests(status = '') {
+        return this.request('GET', `/life-tests${status ? '?test_status=' + status : ''}`);
     }
-    
-    // ==================== Data Upload ====================
-    
-    async uploadData(testName, description, data) {
-        return this.request('POST', '/uploads/data', {
-            test_name: testName,
-            description,
-            data
-        });
-    }
-    
-    async getMyUploads(limit = 50) {
-        return this.request('GET', `/uploads/my-uploads?limit=${limit}`);
-    }
-    
-    async getAllUploads(limit = 100) {
-        return this.request('GET', `/uploads/all?limit=${limit}`);
-    }
-    
-    // ==================== Upload Interval ====================
-    
-    async getUploadInterval() {
-        return this.request('GET', '/config/upload-interval');
-    }
-    
-    async setUploadInterval(intervalMinutes) {
-        return this.request('POST', '/config/upload-interval', {
-            interval_minutes: intervalMinutes
-        });
-    }
-    
-    // ==================== Testing Time ====================
-    
-    async startTesting(testName, notes) {
-        return this.request('POST', '/testing/start', {
-            test_name: testName,
+    getLifeTest(id) { return this.request('GET', `/life-tests/${id}`); }
+    completeLifeTest(id) { return this.request('PATCH', `/life-tests/${id}/complete`); }
+    deleteLifeTest(id)   { return this.request('DELETE', `/life-tests/${id}`); }
+    setECD(id, ecdDate)  { return this.request('PATCH', `/life-tests/${id}/ecd`, { ecd_date: ecdDate }); }
+
+    // ── Syncs ──
+    submitSync(lifeTestId, machineHours, machineMinutes, notes = '') {
+        return this.request('POST', `/life-tests/${lifeTestId}/sync`, {
+            machine_hours: machineHours,
+            machine_minutes: machineMinutes,
             notes
         });
     }
-    
-    async endTesting(sessionId) {
-        return this.request('POST', `/testing/end/${sessionId}`);
-    }
-    
-    async getActiveTesting() {
-        return this.request('GET', '/testing/active');
-    }
-    
-    async getTestingHistory(operatorId = null, limit = 50) {
-        let endpoint = `/testing/history?limit=${limit}`;
-        if (operatorId) {
-            endpoint += `&operator_id=${operatorId}`;
-        }
-        return this.request('GET', endpoint);
-    }
-    
-    // ==================== Dashboard ====================
-    
-    async getDashboardStats() {
-        return this.request('GET', '/dashboard/stats');
-    }
-    
-    async getDashboardSummary() {
-        return this.request('GET', '/dashboard/summary');
-    }
+    getSyncs(lifeTestId) { return this.request('GET', `/life-tests/${lifeTestId}/syncs`); }
+
+    // ── Reports ──
+    getSyncQualityReport() { return this.request('GET', '/reports/sync-quality'); }
+
+    // ── System Pause ──
+    getSystemState() { return this.request('GET', '/system/state'); }
+    pauseSystem(notes = '')  { return this.request('POST', '/system/pause',  { notes }); }
+    resumeSystem(notes = '') { return this.request('POST', '/system/resume', { notes }); }
+    getPauseLogs(limit = 100) { return this.request('GET', `/system/pause-logs?limit=${limit}`); }
+
+    // ── Config (legacy) ──
+    getUploadInterval() { return this.request('GET', '/config/upload-interval'); }
+    setUploadInterval(m) { return this.request('POST', '/config/upload-interval', { interval_minutes: m }); }
 }
 
-// Global API instance
 const api = new LabDataAPI();

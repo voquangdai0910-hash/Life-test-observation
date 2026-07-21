@@ -7,21 +7,24 @@ import os
 import re
 import logging
 
-from config import APP_NAME, ALLOWED_ORIGINS, ALLOWED_ORIGINS_PATTERN, DEFAULT_UPLOAD_INTERVAL
+from config import APP_NAME, ALLOWED_ORIGINS, ALLOWED_ORIGINS_PATTERN, DEFAULT_UPLOAD_INTERVAL, DEBUG
 from models import (
     UserRegister, UserLogin, TokenResponse, DataUpload, 
     UploadIntervalConfig, UploadIntervalResponse, DashboardStats,
     TestingTimeEntry, TestingTimeResponse, CyclePattern, TimeSeriesData,
-    DataUploadWithOnHours, TestingSessionWithOnHours
+    DataUploadWithOnHours, TestingSessionWithOnHours,
+    LifeTestCreate, SyncInput, ECDInput,
+    SystemPauseRequest, SystemStateResponse
 )
 from database import db
 from auth import (
     get_current_user, get_current_operator, get_current_access_person,
     get_current_admin, TokenData, create_access_token
 )
+from security import verify_password, hash_password
 
-# Setup logging
-logging.basicConfig(level=logging.DEBUG)
+# Setup logging — verbose only when DEBUG is explicitly enabled
+logging.basicConfig(level=logging.DEBUG if DEBUG else logging.INFO)
 logger = logging.getLogger(__name__)
 
 # Initialize FastAPI app
@@ -35,9 +38,11 @@ app.add_middleware(
         "http://localhost:3000",
         "http://localhost:8000",
         "http://localhost:8001",
+        "http://localhost:8081",
         "http://127.0.0.1:3000",
         "http://127.0.0.1:8000",
         "http://127.0.0.1:8001",
+        "http://127.0.0.1:8081",
     ],
     allow_origin_regex=r"https://[a-z0-9\-]+\.app\.github\.dev",  # GitHub Codespaces
     allow_credentials=False,
@@ -50,11 +55,11 @@ app.add_middleware(
 # Add debug middleware to log incoming requests
 @app.middleware("http")
 async def debug_middleware(request: Request, call_next):
-    logger.info(f"Incoming {request.method} {request.url.path}")
-    logger.info(f"  Origin: {request.headers.get('origin', 'N/A')}")
-    logger.info(f"  Host: {request.headers.get('host', 'N/A')}")
+    logger.debug(f"Incoming {request.method} {request.url.path}")
+    logger.debug(f"  Origin: {request.headers.get('origin', 'N/A')}")
+    logger.debug(f"  Host: {request.headers.get('host', 'N/A')}")
     response = await call_next(request)
-    logger.info(f"  Response: {response.status_code}")
+    logger.debug(f"  Response: {response.status_code}")
     return response
 
 # ==================== Authentication Routes ====================
@@ -67,36 +72,42 @@ async def options_handler(full_path: str):
 
 @app.post("/api/auth/register", response_model=TokenResponse)
 async def register(user: UserRegister):
-    """Register a new user"""
-    logger.info(f"Register attempt: {user.email}")
+    """Register a new user.
+
+    Self-registration always creates a plain 'operator'. Elevated roles
+    (access_person, admin) must be granted out-of-band by an administrator —
+    the role is never taken from the request body, to prevent privilege
+    escalation.
+    """
+    logger.debug(f"Register attempt: {user.email}")
+    ASSIGNED_ROLE = "operator"
     # Check if user already exists
     existing_user = db.get_user_by_email(user.email)
     if existing_user:
-        logger.warning(f"User already exists: {user.email}")
+        logger.warning("Registration rejected: email already registered")
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Email already registered"
         )
-    
-    # Create user in Supabase Auth
-    result = db.create_user(user.email, user.full_name, user.password, user.role.value)
-    
+
+    result = db.create_user(user.email, user.full_name, user.password, ASSIGNED_ROLE)
+
     if not result["success"]:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=result["error"]
         )
-    
+
     auth_user = result["user"]
-    
+
     # Create token
     token_data = {
         "email": user.email,
         "user_id": auth_user["id"],
-        "role": user.role.value
+        "role": ASSIGNED_ROLE
     }
     access_token = create_access_token(token_data)
-    
+
     return TokenResponse(
         access_token=access_token,
         token_type="bearer",
@@ -104,7 +115,7 @@ async def register(user: UserRegister):
             "id": auth_user["id"],
             "email": user.email,
             "full_name": user.full_name,
-            "role": user.role,
+            "role": ASSIGNED_ROLE,
             "created_at": auth_user["created_at"]
         }
     )
@@ -113,26 +124,34 @@ async def register(user: UserRegister):
 async def login(credentials: UserLogin):
     """Login user with email and password"""
     try:
-        import hashlib
         # Get user from database
         user_data = db.get_user_by_email(credentials.email)
-        
+
         if not user_data:
-            logger.warning(f"Login failed: user not found: {credentials.email}")
+            logger.warning("Login failed: invalid credentials")
             raise HTTPException(
                 status_code=status.HTTP_401_UNAUTHORIZED,
                 detail="Invalid email or password"
             )
-        
-        # Verify password hash
-        password_hash = hashlib.sha256(credentials.password.encode()).hexdigest()
-        if user_data.get("password_hash") != password_hash:
-            logger.warning(f"Login failed: invalid password for {credentials.email}")
+
+        # Verify password (constant-time bcrypt; legacy SHA-256 accepted once)
+        is_valid, needs_rehash = verify_password(
+            credentials.password, user_data.get("password_hash") or ""
+        )
+        if not is_valid:
+            logger.warning("Login failed: invalid credentials")
             raise HTTPException(
                 status_code=status.HTTP_401_UNAUTHORIZED,
                 detail="Invalid email or password"
             )
-        
+
+        # Transparently upgrade legacy unsalted SHA-256 hashes to bcrypt
+        if needs_rehash:
+            try:
+                db.update_password_hash(user_data["id"], hash_password(credentials.password))
+            except Exception as upgrade_err:
+                logger.error(f"Password hash upgrade failed: {upgrade_err}")
+
         # Create token
         token_data = {
             "email": credentials.email,
@@ -141,7 +160,7 @@ async def login(credentials: UserLogin):
         }
         access_token = create_access_token(token_data)
         
-        logger.info(f"Login successful: {credentials.email}")
+        logger.info(f"Login successful for user {user_data.get('id')}")
         
         return TokenResponse(
             access_token=access_token,
@@ -434,6 +453,369 @@ async def root():
         "docs": "/docs"
     }
 
+# ==================== Life Test Routes ====================
+
+def _estimate_hours(last_machine_hours: float, last_synced_at: str,
+                    current_time: datetime, on_minutes: float, off_minutes: float,
+                    paused_seconds: float = 0.0) -> float:
+    """Estimate current machine hours given last sync data, cycle pattern, and paused duration."""
+    try:
+        sync_time = datetime.fromisoformat(last_synced_at.rstrip('Z'))
+        raw_elapsed_sec = max(0.0, (current_time - sync_time).total_seconds())
+        elapsed_sec = max(0.0, raw_elapsed_sec - paused_seconds)
+        on_sec = on_minutes * 60.0
+        cycle_sec = (on_minutes + off_minutes) * 60.0
+        if cycle_sec == 0:
+            return last_machine_hours
+        full_cycles = int(elapsed_sec // cycle_sec)
+        remainder = elapsed_sec % cycle_sec
+        on_in_remainder = min(remainder, on_sec)
+        on_since_sync = full_cycles * on_sec + on_in_remainder
+        return last_machine_hours + on_since_sync / 3600.0
+    except Exception:
+        return last_machine_hours
+
+
+def _get_effective_now(system_state: dict) -> datetime:
+    """Return the effective 'now' — frozen at paused_at if system is paused."""
+    if system_state.get("is_paused") and system_state.get("paused_at"):
+        return datetime.fromisoformat(system_state["paused_at"].rstrip('Z'))
+    return datetime.utcnow()
+
+
+@app.post("/api/life-tests")
+async def create_life_test(
+    payload: LifeTestCreate,
+    current_user: TokenData = Depends(get_current_operator)
+):
+    """Create a new life test (operator)"""
+    result = db.create_life_test(
+        test_label=payload.test_label,
+        product=payload.product,
+        operator_id=current_user.user_id,
+        on_minutes=payload.on_minutes,
+        off_minutes=payload.off_minutes,
+        target_hours=payload.target_hours,
+        initial_machine_hours=payload.initial_machine_hours,
+        notes=payload.notes
+    )
+    if not result["success"]:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=result["error"])
+    return {"message": "Life test created", "id": result["id"], "test_label": result["test_label"]}
+
+
+@app.get("/api/life-tests")
+async def list_life_tests(
+    test_status: str = None,
+    current_user: TokenData = Depends(get_current_user)
+):
+    """List all life tests with pause-aware estimated hours"""
+    tests = db.get_life_tests(status=test_status)
+    system_state = db.get_system_state()
+    effective_now = _get_effective_now(system_state)
+    effective_now_iso = effective_now.isoformat() + 'Z'
+
+    for test in tests:
+        paused_sec = 0.0
+        if test.get("last_sync") and test["status"] == "running":
+            paused_sec = db.get_paused_seconds_between(
+                test["last_sync"]["synced_at"], effective_now_iso
+            )
+        test["paused_seconds_since_sync"] = paused_sec
+        test["system_is_paused"] = system_state["is_paused"]
+        test["system_paused_at"] = system_state["paused_at"]
+
+    return {"life_tests": tests, "count": len(tests)}
+
+
+@app.get("/api/life-tests/{lt_id}")
+async def get_life_test(
+    lt_id: str,
+    current_user: TokenData = Depends(get_current_user)
+):
+    """Get a single life test with pause-aware current estimate"""
+    test = db.get_life_test(lt_id)
+    if not test:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Life test not found")
+
+    system_state = db.get_system_state()
+    effective_now = _get_effective_now(system_state)
+    effective_now_iso = effective_now.isoformat() + 'Z'
+
+    estimated_hours = None
+    paused_sec = 0.0
+    if test.get("last_sync") and test["status"] == "running":
+        paused_sec = db.get_paused_seconds_between(
+            test["last_sync"]["synced_at"], effective_now_iso
+        )
+        estimated_hours = _estimate_hours(
+            test["last_sync"]["machine_hours"],
+            test["last_sync"]["synced_at"],
+            effective_now,
+            test["on_minutes"],
+            test["off_minutes"],
+            paused_sec
+        )
+
+    # Total time this test's timeline has been frozen by system pauses,
+    # measured from test creation until now (or until completion).
+    pause_window_end = effective_now_iso
+    if test["status"] == "completed" and test.get("completed_at"):
+        pause_window_end = test["completed_at"]
+    total_paused_seconds = 0.0
+    if test.get("created_at"):
+        total_paused_seconds = db.get_paused_seconds_between(test["created_at"], pause_window_end)
+
+    test["estimated_hours"] = estimated_hours
+    test["paused_seconds_since_sync"] = paused_sec
+    test["total_paused_seconds"] = total_paused_seconds
+    test["system_is_paused"] = system_state["is_paused"]
+    test["system_paused_at"] = system_state["paused_at"]
+    return test
+
+
+@app.post("/api/life-tests/{lt_id}/sync")
+async def submit_sync(
+    lt_id: str,
+    payload: SyncInput,
+    current_user: TokenData = Depends(get_current_operator)
+):
+    """Operator submits a sync reading from the machine display"""
+    test = db.get_life_test(lt_id)
+    if not test:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Life test not found")
+    if test["status"] != "running":
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Life test is not running")
+
+    machine_hours_total = payload.machine_hours + payload.machine_minutes / 60.0
+    now = datetime.utcnow()
+
+    # Compute what the system was estimating right now (pause-aware)
+    system_state = db.get_system_state()
+    effective_now = _get_effective_now(system_state)
+    effective_now_iso = effective_now.isoformat() + 'Z'
+
+    estimated_hours = machine_hours_total  # default if no prior sync
+    if test.get("last_sync"):
+        paused_sec = db.get_paused_seconds_between(
+            test["last_sync"]["synced_at"], effective_now_iso
+        )
+        estimated_hours = _estimate_hours(
+            test["last_sync"]["machine_hours"],
+            test["last_sync"]["synced_at"],
+            effective_now,
+            test["on_minutes"],
+            test["off_minutes"],
+            paused_sec
+        )
+
+    difference_minutes = (machine_hours_total - estimated_hours) * 60.0
+
+    result = db.add_sync_record(
+        life_test_id=lt_id,
+        machine_hours=machine_hours_total,
+        estimated_hours=round(estimated_hours, 4),
+        difference_minutes=round(difference_minutes, 2),
+        operator_id=current_user.user_id,
+        notes=payload.notes
+    )
+    if not result["success"]:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=result["error"])
+
+    return {
+        "message": "Sync recorded",
+        "machine_hours": machine_hours_total,
+        "system_estimated_hours": round(estimated_hours, 4),
+        "difference_minutes": round(difference_minutes, 2),
+        "synced_at": result["synced_at"]
+    }
+
+
+@app.get("/api/life-tests/{lt_id}/syncs")
+async def get_syncs(
+    lt_id: str,
+    current_user: TokenData = Depends(get_current_user)
+):
+    """Get sync history for a life test"""
+    test = db.get_life_test(lt_id)
+    if not test:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Life test not found")
+    syncs = db.get_sync_records(lt_id)
+    return {"syncs": syncs, "count": len(syncs)}
+
+
+@app.patch("/api/life-tests/{lt_id}/complete")
+async def complete_life_test(
+    lt_id: str,
+    current_user: TokenData = Depends(get_current_operator)
+):
+    """Mark a life test as completed, snapshotting the final estimated hours"""
+    test = db.get_life_test(lt_id)
+    if not test:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Life test not found")
+    if test["status"] != "running":
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Only running tests can be completed")
+
+    # Calculate the accumulated ON-hours at this exact moment (pause-aware)
+    now = datetime.utcnow()
+    final_hours = 0.0
+    if test.get("last_sync"):
+        system_state = db.get_system_state()
+        effective_now = _get_effective_now(system_state)
+        effective_now_iso = effective_now.isoformat() + 'Z'
+        paused_sec = db.get_paused_seconds_between(
+            test["last_sync"]["synced_at"], effective_now_iso
+        )
+        final_hours = _estimate_hours(
+            test["last_sync"]["machine_hours"],
+            test["last_sync"]["synced_at"],
+            effective_now,
+            test["on_minutes"],
+            test["off_minutes"],
+            paused_sec
+        )
+
+    # Store the final value as a completion sync so the frozen counter is accurate
+    db.add_sync_record(
+        life_test_id=lt_id,
+        machine_hours=round(final_hours, 4),
+        estimated_hours=round(final_hours, 4),
+        difference_minutes=0.0,
+        operator_id=current_user.user_id,
+        notes="Test completed"
+    )
+
+    result = db.complete_life_test(lt_id)
+    if not result["success"]:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=result["error"])
+    return {"message": "Life test marked as completed", "final_hours": round(final_hours, 4)}
+
+
+@app.patch("/api/life-tests/{lt_id}/ecd")
+async def set_ecd(
+    lt_id: str,
+    payload: ECDInput,
+    current_user: TokenData = Depends(get_current_operator)
+):
+    """Set or update the Estimated Completion Date (operator only)"""
+    test = db.get_life_test(lt_id)
+    if not test:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Life test not found")
+    result = db.set_ecd(lt_id, payload.ecd_date)
+    if not result["success"]:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=result["error"])
+    return {"message": "ECD updated", "ecd": payload.ecd_date}
+
+
+@app.delete("/api/life-tests/{lt_id}")
+async def delete_life_test(
+    lt_id: str,
+    current_user: TokenData = Depends(get_current_operator)
+):
+    """Delete a completed life test and all its data (operator only)"""
+    test = db.get_life_test(lt_id)
+    if not test:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Life test not found")
+    if test["status"] != "completed":
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Only completed tests can be deleted"
+        )
+    result = db.delete_life_test(lt_id)
+    if not result["success"]:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=result["error"])
+    return {"message": "Life test deleted successfully"}
+
+
+@app.get("/api/reports/sync-quality")
+async def sync_quality_report(
+    current_user: TokenData = Depends(get_current_access_person)
+):
+    """Sync quality report"""
+    report = db.get_sync_quality_report()
+    return {"report": report}
+
+
+# ==================== System Pause / Resume Routes ====================
+
+@app.get("/api/system/state")
+async def get_system_state(current_user: TokenData = Depends(get_current_user)):
+    """Get current system pause state (any authenticated user)"""
+    state = db.get_system_state()
+    paused_by_name = None
+    if state["paused_by"]:
+        user = db.get_user_by_id(state["paused_by"])
+        paused_by_name = user["full_name"] if user else state["paused_by"]
+    return {
+        "is_paused": state["is_paused"],
+        "paused_at": state["paused_at"],
+        "paused_by": state["paused_by"],
+        "paused_by_name": paused_by_name,
+        "active_pause_id": state["active_pause_id"],
+        "total_paused_minutes_ever": state["total_paused_minutes_ever"]
+    }
+
+
+@app.post("/api/system/pause")
+async def pause_system(
+    req: SystemPauseRequest,
+    current_user: TokenData = Depends(get_current_operator)
+):
+    """Pause all life-test timers (operator and above)"""
+    user = db.get_user_by_id(current_user.user_id)
+    operator_name = user["full_name"] if user else current_user.user_id
+    result = db.pause_system(current_user.user_id, operator_name, req.notes)
+    if not result["success"]:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=result["error"])
+    logger.info(f"System PAUSED by {operator_name} at {result['paused_at']}")
+    return {
+        "message": "System paused — all timers frozen",
+        "paused_at": result["paused_at"],
+        "paused_by": operator_name,
+        "pause_id": result["pause_id"]
+    }
+
+
+@app.post("/api/system/resume")
+async def resume_system(
+    req: SystemPauseRequest,
+    current_user: TokenData = Depends(get_current_operator)
+):
+    """Resume all life-test timers (operator and above)"""
+    user = db.get_user_by_id(current_user.user_id)
+    operator_name = user["full_name"] if user else current_user.user_id
+    result = db.resume_system(current_user.user_id, operator_name, req.notes)
+    if not result["success"]:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=result["error"])
+
+    # Recalculate ECDs: push out the completion date of every running test by
+    # the whole number of days lost to this pause, so the timeline reflects
+    # actual factory operating days.
+    paused_days = int(round(result["total_paused_minutes"] / 1440.0))
+    ecd_updated_count = db.advance_running_ecds(paused_days)
+
+    logger.info(f"System RESUMED by {operator_name} at {result['resumed_at']}")
+    return {
+        "message": "System resumed — timers restarted",
+        "resumed_at": result["resumed_at"],
+        "resumed_by": operator_name,
+        "total_paused_minutes": result["total_paused_minutes"],
+        "ecd_shifted_days": paused_days,
+        "ecd_updated_count": ecd_updated_count
+    }
+
+
+@app.get("/api/system/pause-logs")
+async def get_pause_logs(
+    limit: int = 100,
+    current_user: TokenData = Depends(get_current_access_person)
+):
+    """Get audit log of all pause/resume events (access person and above)"""
+    logs = db.get_pause_logs(limit)
+    return {"logs": logs, "count": len(logs)}
+
+
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True)
+

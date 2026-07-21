@@ -9,14 +9,14 @@ A complete application for laboratory data management with testing time observat
 - **Testing Time Tracking**: Monitor active and completed testing sessions
 - **Real-time Dashboard**: Access persons observe testing status and upload history
 - **Upload Interval Configuration**: Admins can customize upload frequency
-- **Supabase Integration**: Secure database with authentication and RLS policies
+- **Local SQLite Database**: Zero-config, created automatically on first run
 
 ## Tech Stack
 
 - **Backend**: Python with FastAPI
 - **Frontend**: HTML5, CSS3, JavaScript (Vanilla)
-- **Database**: Supabase (PostgreSQL)
-- **Authentication**: Supabase Auth with JWT tokens
+- **Database**: SQLite (Python standard library)
+- **Authentication**: JWT tokens (PyJWT) with bcrypt password hashing
 
 ## Project Structure
 
@@ -26,8 +26,9 @@ lab-data-upload/
 │   ├── main.py              # FastAPI application
 │   ├── models.py            # Pydantic models
 │   ├── config.py            # Configuration settings
-│   ├── database.py          # Supabase database handler
-│   ├── auth.py              # Authentication utilities
+│   ├── database.py          # Local SQLite database handler
+│   ├── security.py          # Password hashing (bcrypt)
+│   ├── auth.py              # Authentication utilities (JWT)
 ├── frontend/
 │   ├── index.html           # Main HTML file
 │   ├── css/
@@ -35,42 +36,21 @@ lab-data-upload/
 │   └── js/
 │       ├── api.js           # API client
 │       └── app.js           # Application logic
-├── requirements.txt         # Python dependencies
-└── database_schema.sql      # Supabase schema setup
+└── requirements.txt         # Python dependencies
 ```
 
 ## Prerequisites
 
 - Python 3.9 or higher
-- Node.js/npm (optional, for frontend development)
-- Supabase account (free tier available at https://supabase.com)
 - Git (for version control)
+- Modern web browser
+
+No external database or account is required — the app uses a local SQLite
+file created automatically on first run.
 
 ## Setup Instructions
 
-### 1. Create Supabase Project
-
-1. Go to https://supabase.com and sign up/login
-2. Create a new project:
-   - Project Name: `lab-data-upload`
-   - Database Password: (set a strong password)
-   - Region: (choose closest to you)
-3. Wait for the project to initialize (2-3 minutes)
-4. Copy your project credentials:
-   - Project URL (SUPABASE_URL)
-   - Anon Key (SUPABASE_KEY)
-   - Service Role Key (SUPABASE_SERVICE_KEY)
-
-### 2. Set Up Database Schema
-
-1. In Supabase dashboard, go to **SQL Editor**
-2. Click **New Query**
-3. Copy the entire content from `database_schema.sql`
-4. Paste it into the SQL editor
-5. Click **Run** to execute all SQL statements
-6. Verify tables are created under **Table Editor**
-
-### 3. Install Backend Dependencies
+### 1. Install Backend Dependencies
 
 ```bash
 cd lab-data-upload
@@ -85,36 +65,35 @@ venv\Scripts\activate
 pip install -r requirements.txt
 ```
 
-### 4. Configure Environment Variables
+### 2. Configure Environment Variables
 
-Create a `.env` file in the `backend` directory:
+Create a `.env` file in the `backend` directory (copy `.env.example`):
 
 ```env
-# Supabase Configuration
-SUPABASE_URL=https://your-project.supabase.co
-SUPABASE_KEY=your-anon-key
-SUPABASE_SERVICE_KEY=your-service-role-key
-
 # Application Configuration
-DEBUG=True
-SECRET_KEY=your-secret-key-change-in-production
+DEBUG=False
+SECRET_KEY=your-secret-key   # generate: python -c "import secrets; print(secrets.token_urlsafe(64))"
 
 # Default upload interval in minutes (4 hours = 240 minutes)
 DEFAULT_UPLOAD_INTERVAL=240
 ```
 
-### 5. Start the Backend Server
+If `SECRET_KEY` is left blank, a random ephemeral key is generated at startup
+(tokens are invalidated on every restart).
+
+### 3. Start the Backend Server
 
 ```bash
 cd backend
 python main.py
 ```
 
-The API will be available at `http://localhost:8000`
+The API will be available at `http://localhost:8000`. On first run this
+creates the SQLite database at `backend/local_database.db`.
 
 API Documentation (Swagger UI): `http://localhost:8000/docs`
 
-### 6. Serve the Frontend
+### 4. Serve the Frontend
 
 Option A: Using Python's built-in server
 ```bash
@@ -180,7 +159,7 @@ Access the application at `http://localhost:8000/` or `http://localhost:8001/` d
 ### Admin
 - All access person permissions
 - Configure upload interval
-- Manage user roles (via Supabase dashboard)
+- Manage user roles (via direct SQLite update — see README)
 
 ## Usage Guide
 
@@ -257,13 +236,14 @@ web: cd backend && python -m uvicorn main:app --host 0.0.0.0 --port $PORT
 ```bash
 heroku login
 heroku create your-app-name
-heroku config:set SUPABASE_URL=your-url
-heroku config:set SUPABASE_KEY=your-key
-heroku config:set SUPABASE_SERVICE_KEY=your-service-key
 heroku config:set SECRET_KEY=your-production-secret-key
 heroku config:set DEBUG=False
 git push heroku main
 ```
+
+Note: SQLite lives on the local filesystem, which is ephemeral on Heroku
+dynos — data does not persist across restarts/deploys. Use a persistent
+volume or a managed database for durable production storage.
 
 ### Using Docker
 
@@ -287,19 +267,19 @@ CMD ["python", "-m", "uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000
 ## Troubleshooting
 
 ### Login Issues
-- Check SUPABASE_URL and SUPABASE_KEY in `.env`
-- Verify user exists in Supabase Auth
+- Confirm the account was registered (self-registration creates operators)
 - Check browser console for error messages
+- Delete `backend/local_database.db` to start fresh (destroys all data)
 
 ### Upload Errors
 - Verify JSON format in data field
 - Ensure operator is logged in
 - Check network connection
 
-### Database Connection Issues
-- Verify Supabase project is active
-- Check SUPABASE_SERVICE_KEY is correct
-- Ensure RLS policies are enabled
+### Database Issues
+- The schema is created automatically at startup (`init_db`)
+- If the SQLite file is corrupt, delete `backend/local_database.db` and
+  restart the backend to recreate it
 
 ### Frontend Not Loading
 - Check frontend server is running
@@ -309,16 +289,14 @@ CMD ["python", "-m", "uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000
 
 ## Security Considerations
 
-1. **Change Default Secret Key**: Update SECRET_KEY in production
+1. **Set a Strong Secret Key**: Configure SECRET_KEY in production
 2. **Enable HTTPS**: Use SSL/TLS in production
 3. **Strong Passwords**: Enforce strong password requirements
-4. **RLS Policies**: Verify Row Level Security policies are active in Supabase
-5. **API Rate Limiting**: Consider adding rate limiting middleware
-6. **Regular Backups**: Enable automatic backups in Supabase
+4. **API Rate Limiting**: Consider adding rate limiting middleware
+5. **Regular Backups**: Back up `backend/local_database.db` regularly
 
 ## Support & Documentation
 
-- **Supabase Docs**: https://supabase.com/docs
 - **FastAPI Docs**: https://fastapi.tiangolo.com
 - **Pydantic Docs**: https://docs.pydantic.dev
 - **API Documentation**: Available at `/docs` endpoint when backend is running

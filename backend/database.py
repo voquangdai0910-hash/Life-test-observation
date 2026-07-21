@@ -1,435 +1,470 @@
+﻿import sqlite3
+import uuid
 from datetime import datetime, timedelta
 from typing import Optional, Dict, List
 import json
-import psycopg2
-from psycopg2.extras import RealDictCursor
-from config import DB_HOST, DB_PORT, DB_NAME, DB_USER, DB_PASSWORD
+import os
+
+# Local SQLite database file stored alongside this module
+DB_PATH = os.path.join(os.path.dirname(__file__), "local_database.db")
 
 
-class SupabaseDB:
-    """Database handler using direct PostgreSQL connection"""
-    
+class LocalDB:
+    """Database handler using local SQLite"""
+
     def __init__(self):
-        self.db_config = {
-            'host': DB_HOST,
-            'port': int(DB_PORT),
-            'database': DB_NAME,
-            'user': DB_USER,
-            'password': DB_PASSWORD
-        }
-    
+        self.db_path = DB_PATH
+        self.init_db()
+
     def get_connection(self):
-        """Get a database connection"""
-        return psycopg2.connect(**self.db_config)
+        """Get a SQLite database connection with row-as-dict support"""
+        conn = sqlite3.connect(self.db_path)
+        conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA foreign_keys=ON")
+        return conn
+
+    def init_db(self):
+        """Create tables if they don't exist"""
+        conn = self.get_connection()
+        conn.executescript("""
+            CREATE TABLE IF NOT EXISTS users (
+                id TEXT PRIMARY KEY,
+                email TEXT UNIQUE NOT NULL,
+                full_name TEXT,
+                password_hash TEXT,
+                role TEXT CHECK(role IN ('operator','access_person','admin')) DEFAULT 'operator',
+                created_at TEXT DEFAULT (datetime('now')),
+                updated_at TEXT DEFAULT (datetime('now'))
+            );
+
+            CREATE TABLE IF NOT EXISTS data_uploads (
+                id TEXT PRIMARY KEY,
+                operator_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                test_name TEXT NOT NULL,
+                description TEXT,
+                data TEXT,
+                uploaded_at TEXT DEFAULT (datetime('now')),
+                file_url TEXT,
+                created_at TEXT DEFAULT (datetime('now'))
+            );
+
+            CREATE TABLE IF NOT EXISTS testing_sessions (
+                id TEXT PRIMARY KEY,
+                operator_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                test_name TEXT NOT NULL,
+                start_time TEXT DEFAULT (datetime('now')),
+                end_time TEXT,
+                status TEXT CHECK(status IN ('running','completed','paused','cancelled')) DEFAULT 'running',
+                notes TEXT,
+                created_at TEXT DEFAULT (datetime('now')),
+                updated_at TEXT DEFAULT (datetime('now'))
+            );
+
+            CREATE TABLE IF NOT EXISTS upload_config (
+                id INTEGER PRIMARY KEY DEFAULT 1,
+                interval_minutes INTEGER DEFAULT 240,
+                updated_at TEXT DEFAULT (datetime('now')),
+                updated_by TEXT REFERENCES users(id)
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_uploads_operator ON data_uploads(operator_id);
+            CREATE INDEX IF NOT EXISTS idx_uploads_time    ON data_uploads(uploaded_at);
+            CREATE INDEX IF NOT EXISTS idx_sessions_operator ON testing_sessions(operator_id);
+            CREATE INDEX IF NOT EXISTS idx_sessions_status   ON testing_sessions(status);
+            CREATE INDEX IF NOT EXISTS idx_users_role        ON users(role);
+
+            CREATE TABLE IF NOT EXISTS life_tests (
+                id TEXT PRIMARY KEY,
+                test_label TEXT UNIQUE NOT NULL,
+                product TEXT NOT NULL,
+                operator_id TEXT NOT NULL REFERENCES users(id),
+                on_minutes REAL DEFAULT 8.0,
+                off_minutes REAL DEFAULT 2.0,
+                target_hours INTEGER DEFAULT 468,
+                status TEXT CHECK(status IN ('running','completed','paused')) DEFAULT 'running',
+                notes TEXT,
+                completed_at TEXT,
+                ecd TEXT,
+                created_at TEXT DEFAULT (datetime('now')),
+                updated_at TEXT DEFAULT (datetime('now'))
+            );
+
+            CREATE TABLE IF NOT EXISTS sync_records (
+                id TEXT PRIMARY KEY,
+                life_test_id TEXT NOT NULL REFERENCES life_tests(id) ON DELETE CASCADE,
+                machine_hours REAL NOT NULL,
+                estimated_hours REAL,
+                difference_minutes REAL DEFAULT 0,
+                synced_at TEXT DEFAULT (datetime('now')),
+                operator_id TEXT REFERENCES users(id),
+                notes TEXT
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_syncs_life_test ON sync_records(life_test_id);
+            CREATE INDEX IF NOT EXISTS idx_syncs_synced_at ON sync_records(synced_at);
+
+            CREATE TABLE IF NOT EXISTS system_state (
+                id INTEGER PRIMARY KEY DEFAULT 1,
+                is_paused INTEGER NOT NULL DEFAULT 0,
+                paused_at TEXT,
+                paused_by TEXT REFERENCES users(id),
+                updated_at TEXT DEFAULT (datetime('now'))
+            );
+
+            CREATE TABLE IF NOT EXISTS system_pause_logs (
+                id TEXT PRIMARY KEY,
+                operator_id TEXT REFERENCES users(id),
+                operator_name TEXT,
+                pause_time TEXT NOT NULL,
+                resume_time TEXT,
+                total_paused_minutes REAL,
+                notes TEXT,
+                created_at TEXT DEFAULT (datetime('now'))
+            );
+        """)
+        conn.commit()
+        conn.close()
+
+        # Migrate existing databases: add new columns if absent
+        conn2 = self.get_connection()
+        for col in ('completed_at', 'ecd'):
+            try:
+                conn2.execute(f"ALTER TABLE life_tests ADD COLUMN {col} TEXT")
+                conn2.commit()
+            except Exception:
+                pass  # column already exists
+        conn2.close()
     
     # ==================== User Methods ====================
-    
+
     def create_user(self, email: str, full_name: str, password: str, role: str) -> dict:
         """Create a new user with hashed password"""
         try:
-            import hashlib
-            # Simple password hashing (in production, use bcrypt or similar)
-            password_hash = hashlib.sha256(password.encode()).hexdigest()
-            
+            from security import hash_password
+            password_hash = hash_password(password)
+            user_id = str(uuid.uuid4())
+            now = datetime.utcnow().isoformat() + 'Z'
+
             conn = self.get_connection()
-            cursor = conn.cursor()
-            
-            cursor.execute(
-                """
-                INSERT INTO users (email, full_name, password_hash, role, created_at)
-                VALUES (%s, %s, %s, %s, %s)
-                RETURNING id, email, full_name, role, created_at
-                """,
-                (email, full_name, password_hash, role, datetime.utcnow())
+            conn.execute(
+                "INSERT INTO users (id, email, full_name, password_hash, role, created_at, updated_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (user_id, email, full_name, password_hash, role, now, now)
             )
-            
-            user = cursor.fetchone()
             conn.commit()
-            cursor.close()
             conn.close()
-            
-            if user:
-                return {
-                    "success": True,
-                    "user": {
-                        "id": str(user[0]),
-                        "email": user[1],
-                        "full_name": user[2],
-                        "role": user[3],
-                        "created_at": user[4]
-                    }
+
+            return {
+                "success": True,
+                "user": {
+                    "id": user_id,
+                    "email": email,
+                    "full_name": full_name,
+                    "role": role,
+                    "created_at": now
                 }
-            return {"success": False, "error": "Failed to create user"}
-        except psycopg2.IntegrityError:
+            }
+        except sqlite3.IntegrityError:
             return {"success": False, "error": "Email already exists"}
         except Exception as e:
             return {"success": False, "error": str(e)}
-    
+
     def get_user_by_email(self, email: str) -> Optional[dict]:
         """Get user by email"""
         try:
             conn = self.get_connection()
-            cursor = conn.cursor(cursor_factory=RealDictCursor)
-            cursor.execute("SELECT * FROM users WHERE email = %s", (email,))
-            user = cursor.fetchone()
-            cursor.close()
+            row = conn.execute("SELECT * FROM users WHERE email = ?", (email,)).fetchone()
             conn.close()
-            return dict(user) if user else None
+            return dict(row) if row else None
         except Exception as e:
             print(f"Error getting user: {e}")
             return None
-    
+
     def get_user_by_id(self, user_id: str) -> Optional[dict]:
         """Get user by ID"""
         try:
             conn = self.get_connection()
-            cursor = conn.cursor(cursor_factory=RealDictCursor)
-            cursor.execute("SELECT * FROM users WHERE id::text = %s", (user_id,))
-            user = cursor.fetchone()
-            cursor.close()
+            row = conn.execute("SELECT * FROM users WHERE id = ?", (user_id,)).fetchone()
             conn.close()
-            return dict(user) if user else None
+            return dict(row) if row else None
         except Exception as e:
             print(f"Error getting user: {e}")
             return None
-    
+
+    def update_password_hash(self, user_id: str, password_hash: str) -> bool:
+        """Update a user's stored password hash (used to upgrade legacy hashes)"""
+        try:
+            now = datetime.utcnow().isoformat() + 'Z'
+            conn = self.get_connection()
+            conn.execute(
+                "UPDATE users SET password_hash = ?, updated_at = ? WHERE id = ?",
+                (password_hash, now, user_id)
+            )
+            conn.commit()
+            conn.close()
+            return True
+        except Exception as e:
+            print(f"Error updating password hash: {e}")
+            return False
+
     # ==================== Data Upload Methods ====================
-    
+
     def upload_data(self, operator_id: str, test_name: str, description: str, data: dict) -> dict:
         """Upload test data"""
         try:
+            upload_id = str(uuid.uuid4())
+            now = datetime.utcnow().isoformat() + 'Z'
+
             conn = self.get_connection()
-            cursor = conn.cursor()
-            
-            cursor.execute(
-                """
-                INSERT INTO data_uploads (operator_id, test_name, description, data, uploaded_at)
-                VALUES (%s::uuid, %s, %s, %s::jsonb, %s)
-                RETURNING id, operator_id, test_name, description, data, uploaded_at
-                """,
-                (operator_id, test_name, description, json.dumps(data), datetime.utcnow())
+            conn.execute(
+                "INSERT INTO data_uploads (id, operator_id, test_name, description, data, uploaded_at, created_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (upload_id, operator_id, test_name, description, json.dumps(data), now, now)
             )
-            
-            upload = cursor.fetchone()
             conn.commit()
-            cursor.close()
             conn.close()
-            
-            if upload:
-                return {
-                    "success": True,
-                    "upload": {
-                        "id": str(upload[0]),
-                        "operator_id": str(upload[1]),
-                        "test_name": upload[2],
-                        "description": upload[3],
-                        "data": upload[4] if isinstance(upload[4], dict) else json.loads(upload[4]) if upload[4] else {},
-                        "uploaded_at": upload[5]
-                    }
+
+            return {
+                "success": True,
+                "upload": {
+                    "id": upload_id,
+                    "operator_id": operator_id,
+                    "test_name": test_name,
+                    "description": description,
+                    "data": data,
+                    "uploaded_at": now
                 }
-            return {"success": False, "error": "Failed to insert data"}
+            }
         except Exception as e:
             return {"success": False, "error": str(e)}
-    
+
     def get_uploads_by_operator(self, operator_id: str, limit: int = 50) -> List[dict]:
         """Get uploads by operator"""
         try:
             conn = self.get_connection()
-            cursor = conn.cursor(cursor_factory=RealDictCursor)
-            cursor.execute(
-                """
-                SELECT * FROM data_uploads 
-                WHERE operator_id::text = %s
-                ORDER BY uploaded_at DESC
-                LIMIT %s
-                """,
+            rows = conn.execute(
+                "SELECT * FROM data_uploads WHERE operator_id = ? ORDER BY uploaded_at DESC LIMIT ?",
                 (operator_id, limit)
-            )
-            uploads = cursor.fetchall()
-            cursor.close()
+            ).fetchall()
             conn.close()
-            
-            return [dict(u) for u in uploads]
+            result = []
+            for r in rows:
+                row = dict(r)
+                if row.get("data"):
+                    row["data"] = json.loads(row["data"])
+                result.append(row)
+            return result
         except Exception as e:
             print(f"Error fetching uploads: {e}")
             return []
-    
+
     def get_all_uploads(self, limit: int = 100) -> List[dict]:
         """Get all uploads"""
         try:
             conn = self.get_connection()
-            cursor = conn.cursor(cursor_factory=RealDictCursor)
-            cursor.execute(
-                """
-                SELECT * FROM data_uploads
-                ORDER BY uploaded_at DESC
-                LIMIT %s
-                """,
-                (limit,)
-            )
-            uploads = cursor.fetchall()
-            cursor.close()
+            rows = conn.execute(
+                "SELECT * FROM data_uploads ORDER BY uploaded_at DESC LIMIT ?", (limit,)
+            ).fetchall()
             conn.close()
-            
-            return [dict(u) for u in uploads]
+            result = []
+            for r in rows:
+                row = dict(r)
+                if row.get("data"):
+                    row["data"] = json.loads(row["data"])
+                result.append(row)
+            return result
         except Exception as e:
             print(f"Error fetching uploads: {e}")
             return []
-    
+
     def get_last_upload_time(self) -> Optional[datetime]:
         """Get the time of the last upload"""
         try:
             conn = self.get_connection()
-            cursor = conn.cursor()
-            cursor.execute(
+            row = conn.execute(
                 "SELECT uploaded_at FROM data_uploads ORDER BY uploaded_at DESC LIMIT 1"
-            )
-            result = cursor.fetchone()
-            cursor.close()
+            ).fetchone()
             conn.close()
-            
-            if result:
-                return result[0]
+            if row:
+                return datetime.fromisoformat(row[0].rstrip("Z"))
             return None
         except Exception as e:
             print(f"Error fetching last upload: {e}")
             return None
-    
+
     # ==================== Upload Interval Configuration ====================
-    
+
     def get_upload_interval(self) -> int:
         """Get current upload interval in minutes"""
         try:
             conn = self.get_connection()
-            cursor = conn.cursor()
-            cursor.execute("SELECT interval_minutes FROM upload_config WHERE id = 1")
-            result = cursor.fetchone()
-            cursor.close()
+            row = conn.execute("SELECT interval_minutes FROM upload_config WHERE id = 1").fetchone()
             conn.close()
-            
-            if result:
-                return result[0]
-            return 240
+            return row[0] if row else 240
         except Exception as e:
             print(f"Error fetching upload interval: {e}")
             return 240
-    
+
     def set_upload_interval(self, interval_minutes: int, updated_by: str) -> dict:
         """Set upload interval"""
         try:
+            now = datetime.utcnow().isoformat() + 'Z'
             conn = self.get_connection()
-            cursor = conn.cursor()
-            
-            cursor.execute(
-                """
-                INSERT INTO upload_config (id, interval_minutes, updated_at, updated_by)
-                VALUES (1, %s, %s, %s::uuid)
-                ON CONFLICT (id) DO UPDATE SET 
-                    interval_minutes = %s,
-                    updated_at = %s,
-                    updated_by = %s::uuid
-                RETURNING id, interval_minutes, updated_at, updated_by
-                """,
-                (interval_minutes, datetime.utcnow(), updated_by, interval_minutes, datetime.utcnow(), updated_by)
+            conn.execute(
+                "INSERT OR REPLACE INTO upload_config (id, interval_minutes, updated_at, updated_by) "
+                "VALUES (1, ?, ?, ?)",
+                (interval_minutes, now, updated_by)
             )
-            
-            config = cursor.fetchone()
             conn.commit()
-            cursor.close()
             conn.close()
-            
-            if config:
-                return {
-                    "success": True,
-                    "config": {
-                        "id": config[0],
-                        "interval_minutes": config[1],
-                        "updated_at": config[2],
-                        "updated_by": str(config[3])
-                    }
+            return {
+                "success": True,
+                "config": {
+                    "id": 1,
+                    "interval_minutes": interval_minutes,
+                    "updated_at": now,
+                    "updated_by": updated_by
                 }
-            return {"success": False, "error": "Failed to update interval"}
+            }
         except Exception as e:
             return {"success": False, "error": str(e)}
-    
+
     # ==================== Testing Time Methods ====================
-    
+
     def create_testing_session(self, operator_id: str, test_name: str, notes: str = None) -> dict:
         """Create a new testing session"""
         try:
+            session_id = str(uuid.uuid4())
+            now = datetime.utcnow().isoformat() + 'Z'
+
             conn = self.get_connection()
-            cursor = conn.cursor()
-            
-            cursor.execute(
-                """
-                INSERT INTO testing_sessions (operator_id, test_name, start_time, status, notes)
-                VALUES (%s::uuid, %s, %s, 'running', %s)
-                RETURNING id, operator_id, test_name, start_time, end_time, status, notes
-                """,
-                (operator_id, test_name, datetime.utcnow(), notes)
+            conn.execute(
+                "INSERT INTO testing_sessions "
+                "(id, operator_id, test_name, start_time, status, notes, created_at, updated_at) "
+                "VALUES (?, ?, ?, ?, 'running', ?, ?, ?)",
+                (session_id, operator_id, test_name, now, notes, now, now)
             )
-            
-            session = cursor.fetchone()
             conn.commit()
-            cursor.close()
             conn.close()
-            
-            if session:
-                return {
-                    "success": True,
-                    "session": {
-                        "id": str(session[0]),
-                        "operator_id": str(session[1]),
-                        "test_name": session[2],
-                        "start_time": session[3],
-                        "end_time": session[4],
-                        "status": session[5],
-                        "notes": session[6]
-                    }
+
+            return {
+                "success": True,
+                "session": {
+                    "id": session_id,
+                    "operator_id": operator_id,
+                    "test_name": test_name,
+                    "start_time": now,
+                    "end_time": None,
+                    "status": "running",
+                    "notes": notes
                 }
-            return {"success": False, "error": "Failed to create session"}
+            }
         except Exception as e:
             return {"success": False, "error": str(e)}
-    
+
     def end_testing_session(self, session_id: str) -> dict:
         """End a testing session"""
         try:
+            now = datetime.utcnow().isoformat() + 'Z'
             conn = self.get_connection()
-            cursor = conn.cursor()
-            
-            cursor.execute(
-                """
-                UPDATE testing_sessions
-                SET end_time = %s, status = 'completed'
-                WHERE id::text = %s
-                RETURNING id, operator_id, test_name, start_time, end_time, status, notes
-                """,
-                (datetime.utcnow(), session_id)
+            conn.execute(
+                "UPDATE testing_sessions SET end_time = ?, status = 'completed', updated_at = ? WHERE id = ?",
+                (now, now, session_id)
             )
-            
-            session = cursor.fetchone()
             conn.commit()
-            cursor.close()
+            row = conn.execute("SELECT * FROM testing_sessions WHERE id = ?", (session_id,)).fetchone()
             conn.close()
-            
-            if session:
+
+            if row:
+                r = dict(row)
                 return {
                     "success": True,
                     "session": {
-                        "id": str(session[0]),
-                        "operator_id": str(session[1]),
-                        "test_name": session[2],
-                        "start_time": session[3],
-                        "end_time": session[4],
-                        "status": session[5],
-                        "notes": session[6]
+                        "id": r["id"],
+                        "operator_id": r["operator_id"],
+                        "test_name": r["test_name"],
+                        "start_time": r["start_time"],
+                        "end_time": r["end_time"],
+                        "status": r["status"],
+                        "notes": r["notes"]
                     }
                 }
             return {"success": False, "error": "Failed to end session"}
         except Exception as e:
             return {"success": False, "error": str(e)}
-    
+
     def get_active_tests(self) -> List[dict]:
         """Get all active testing sessions"""
         try:
             conn = self.get_connection()
-            cursor = conn.cursor(cursor_factory=RealDictCursor)
-            cursor.execute(
+            rows = conn.execute(
                 """
-                SELECT ts.id::text as id, ts.operator_id::text as operator_id, ts.test_name, 
-                       ts.start_time, ts.end_time, ts.status, ts.notes, 
-                       u.full_name as operator_name
+                SELECT ts.id, ts.operator_id, ts.test_name, ts.start_time, ts.end_time,
+                       ts.status, ts.notes, u.full_name as operator_name
                 FROM testing_sessions ts
                 LEFT JOIN users u ON ts.operator_id = u.id
                 WHERE ts.status = 'running'
                 ORDER BY ts.start_time DESC
                 """
-            )
-            tests = cursor.fetchall()
-            cursor.close()
+            ).fetchall()
             conn.close()
-            
-            return [dict(t) for t in tests]
+            return [dict(r) for r in rows]
         except Exception as e:
             print(f"Error fetching active tests: {e}")
             return []
-    
+
     def get_testing_history(self, operator_id: str = None, limit: int = 50) -> List[dict]:
         """Get testing session history"""
         try:
             conn = self.get_connection()
-            cursor = conn.cursor(cursor_factory=RealDictCursor)
-            
             if operator_id:
-                cursor.execute(
+                rows = conn.execute(
                     """
-                    SELECT ts.id::text as id, ts.operator_id::text as operator_id, ts.test_name, 
-                           ts.start_time, ts.end_time, ts.status, ts.notes,
-                           u.full_name as operator_name
+                    SELECT ts.id, ts.operator_id, ts.test_name, ts.start_time, ts.end_time,
+                           ts.status, ts.notes, u.full_name as operator_name
                     FROM testing_sessions ts
                     LEFT JOIN users u ON ts.operator_id = u.id
-                    WHERE ts.operator_id::text = %s
-                    ORDER BY ts.start_time DESC
-                    LIMIT %s
+                    WHERE ts.operator_id = ?
+                    ORDER BY ts.start_time DESC LIMIT ?
                     """,
                     (operator_id, limit)
-                )
+                ).fetchall()
             else:
-                cursor.execute(
+                rows = conn.execute(
                     """
-                    SELECT ts.id::text as id, ts.operator_id::text as operator_id, ts.test_name, 
-                           ts.start_time, ts.end_time, ts.status, ts.notes,
-                           u.full_name as operator_name
+                    SELECT ts.id, ts.operator_id, ts.test_name, ts.start_time, ts.end_time,
+                           ts.status, ts.notes, u.full_name as operator_name
                     FROM testing_sessions ts
                     LEFT JOIN users u ON ts.operator_id = u.id
-                    ORDER BY ts.start_time DESC
-                    LIMIT %s
+                    ORDER BY ts.start_time DESC LIMIT ?
                     """,
                     (limit,)
-                )
-            
-            history = cursor.fetchall()
-            cursor.close()
+                ).fetchall()
             conn.close()
-            
-            return [dict(h) for h in history]
+            return [dict(r) for r in rows]
         except Exception as e:
             print(f"Error fetching testing history: {e}")
             return []
-    
+
     def get_dashboard_stats(self) -> dict:
         """Get dashboard statistics"""
         try:
             conn = self.get_connection()
-            cursor = conn.cursor()
-            
-            cursor.execute("SELECT COUNT(*) FROM data_uploads")
-            total_uploads = cursor.fetchone()[0]
-            
-            cursor.execute("SELECT COUNT(*) FROM testing_sessions")
-            total_sessions = cursor.fetchone()[0]
-            
-            cursor.execute("SELECT COUNT(*) FROM testing_sessions WHERE status = 'running'")
-            active_count = cursor.fetchone()[0]
-            
-            cursor.execute("SELECT COUNT(*) FROM testing_sessions WHERE status = 'completed'")
-            completed_count = cursor.fetchone()[0]
-            
-            cursor.execute("SELECT uploaded_at FROM data_uploads ORDER BY uploaded_at DESC LIMIT 1")
-            last_upload_result = cursor.fetchone()
-            last_upload = last_upload_result[0] if last_upload_result else None
-            
-            cursor.execute("SELECT COUNT(*) FROM users WHERE role = 'operator'")
-            operators_count = cursor.fetchone()[0]
-            
-            cursor.close()
+            total_uploads   = conn.execute("SELECT COUNT(*) FROM data_uploads").fetchone()[0]
+            total_sessions  = conn.execute("SELECT COUNT(*) FROM testing_sessions").fetchone()[0]
+            active_count    = conn.execute("SELECT COUNT(*) FROM testing_sessions WHERE status='running'").fetchone()[0]
+            completed_count = conn.execute("SELECT COUNT(*) FROM testing_sessions WHERE status='completed'").fetchone()[0]
+            operators_count = conn.execute("SELECT COUNT(*) FROM users WHERE role='operator'").fetchone()[0]
+            last_row = conn.execute(
+                "SELECT uploaded_at FROM data_uploads ORDER BY uploaded_at DESC LIMIT 1"
+            ).fetchone()
             conn.close()
-            
+
+            last_upload = datetime.fromisoformat(last_row[0].rstrip("Z")) if last_row else None
             interval = self.get_upload_interval()
-            next_upload = None
-            if last_upload:
-                next_upload = last_upload + timedelta(minutes=interval)
-            
+            next_upload = last_upload + timedelta(minutes=interval) if last_upload else None
+
             return {
                 "total_uploads": total_uploads,
                 "total_testing_sessions": total_sessions,
@@ -452,23 +487,20 @@ class SupabaseDB:
                 "current_interval_minutes": 240,
                 "operators_count": 0
             }
-    
+
     # ==================== ON Hour Calculation Methods ====================
-    
+
     def calculate_on_hours_from_data(self, data: dict, pattern_key: str = "ul_8min_2min") -> dict:
         """Calculate ON hours from time series data"""
         try:
             from cycle_calculator import TimeSeriesAnalyzer
-            
-            # Extract time series data from the uploaded data
+
             data_points = data.get("data_points", []) or data.get("time_series", [])
-            
             if not data_points:
                 return {"on_hours": 0.0, "cycle_count": 0, "error": "No time series data found"}
-            
+
             analyzer = TimeSeriesAnalyzer(pattern_key)
             on_hours, cycle_count = analyzer.analyze_states(data_points)
-            
             return {
                 "on_hours": on_hours,
                 "cycle_count": cycle_count,
@@ -477,47 +509,41 @@ class SupabaseDB:
         except Exception as e:
             print(f"Error calculating ON hours: {e}")
             return {"on_hours": 0.0, "cycle_count": 0, "error": str(e)}
-    
+
     def get_cumulative_on_hours(self, operator_id: str = None) -> float:
         """Get cumulative ON hours for an operator or all operators"""
         try:
             conn = self.get_connection()
-            cursor = conn.cursor()
-            
             if operator_id:
-                cursor.execute(
-                    """
-                    SELECT COALESCE(SUM((data->>'on_hours')::float), 0)
-                    FROM data_uploads
-                    WHERE (data->>'on_hours') IS NOT NULL
-                    AND operator_id::text = %s
-                    """,
+                rows = conn.execute(
+                    "SELECT data FROM data_uploads WHERE operator_id = ? AND data IS NOT NULL",
                     (operator_id,)
-                )
+                ).fetchall()
             else:
-                cursor.execute(
-                    """
-                    SELECT COALESCE(SUM((data->>'on_hours')::float), 0)
-                    FROM data_uploads
-                    WHERE (data->>'on_hours') IS NOT NULL
-                    """
-                )
-            
-            result = cursor.fetchone()
-            cursor.close()
+                rows = conn.execute(
+                    "SELECT data FROM data_uploads WHERE data IS NOT NULL"
+                ).fetchall()
             conn.close()
-            
-            return round(result[0], 2) if result else 0.0
+
+            total = 0.0
+            for row in rows:
+                try:
+                    d = json.loads(row[0])
+                    total += float(d.get("on_hours", 0) or 0)
+                except Exception:
+                    pass
+            return round(total, 2)
         except Exception as e:
             print(f"Error fetching cumulative ON hours: {e}")
             return 0.0
-    
+
     def get_on_hours_progress(self, operator_id: str = None, target_on_hours: int = 468) -> dict:
         """Get ON hours progress toward target"""
         try:
             cumulative_on_hours = self.get_cumulative_on_hours(operator_id)
-            progress_percent = min((cumulative_on_hours / target_on_hours * 100) if target_on_hours > 0 else 0, 100.0)
-            
+            progress_percent = min(
+                (cumulative_on_hours / target_on_hours * 100) if target_on_hours > 0 else 0, 100.0
+            )
             return {
                 "cumulative_on_hours": cumulative_on_hours,
                 "target_on_hours": target_on_hours,
@@ -536,4 +562,367 @@ class SupabaseDB:
             }
 
 
-db = SupabaseDB()
+    # ==================== Life Test Methods ====================
+
+    def create_life_test(self, test_label: str, product: str, operator_id: str,
+                         on_minutes: float, off_minutes: float, target_hours: int,
+                         initial_machine_hours: float, notes: str = None) -> dict:
+        """Create a new life test with its first sync (initial machine reading)"""
+        try:
+            lt_id = str(uuid.uuid4())
+            sync_id = str(uuid.uuid4())
+            now = datetime.utcnow().isoformat() + 'Z'
+            conn = self.get_connection()
+            conn.execute(
+                "INSERT INTO life_tests (id, test_label, product, operator_id, on_minutes, off_minutes, "
+                "target_hours, status, notes, created_at, updated_at) VALUES (?,?,?,?,?,?,?,'running',?,?,?)",
+                (lt_id, test_label, product, operator_id, on_minutes, off_minutes, target_hours, notes, now, now)
+            )
+            conn.execute(
+                "INSERT INTO sync_records (id, life_test_id, machine_hours, estimated_hours, "
+                "difference_minutes, synced_at, operator_id, notes) VALUES (?,?,?,?,0,?,?,?)",
+                (sync_id, lt_id, initial_machine_hours, initial_machine_hours, now, operator_id, "Initial reading")
+            )
+            conn.commit()
+            conn.close()
+            return {"success": True, "id": lt_id, "test_label": test_label}
+        except sqlite3.IntegrityError:
+            return {"success": False, "error": f"Test ID '{test_label}' already exists"}
+        except Exception as e:
+            return {"success": False, "error": str(e)}
+
+    def _attach_last_sync(self, conn, test: dict) -> dict:
+        """Helper: attach last sync record to a test dict"""
+        row = conn.execute(
+            "SELECT s.*, u.full_name as operator_name FROM sync_records s "
+            "LEFT JOIN users u ON s.operator_id = u.id "
+            "WHERE s.life_test_id = ? ORDER BY s.synced_at DESC LIMIT 1",
+            (test["id"],)
+        ).fetchone()
+        test["last_sync"] = dict(row) if row else None
+        return test
+
+    def get_life_tests(self, status: str = None) -> List[dict]:
+        """List all life tests with their last sync"""
+        try:
+            conn = self.get_connection()
+            if status:
+                rows = conn.execute(
+                    "SELECT lt.*, u.full_name as operator_name FROM life_tests lt "
+                    "LEFT JOIN users u ON lt.operator_id = u.id WHERE lt.status = ? "
+                    "ORDER BY lt.created_at DESC",
+                    (status,)
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    "SELECT lt.*, u.full_name as operator_name FROM life_tests lt "
+                    "LEFT JOIN users u ON lt.operator_id = u.id ORDER BY lt.created_at DESC"
+                ).fetchall()
+            tests = [self._attach_last_sync(conn, dict(r)) for r in rows]
+            conn.close()
+            return tests
+        except Exception as e:
+            print(f"Error getting life tests: {e}")
+            return []
+
+    def get_life_test(self, lt_id: str) -> Optional[dict]:
+        """Get a single life test with its last sync"""
+        try:
+            conn = self.get_connection()
+            row = conn.execute(
+                "SELECT lt.*, u.full_name as operator_name FROM life_tests lt "
+                "LEFT JOIN users u ON lt.operator_id = u.id WHERE lt.id = ?",
+                (lt_id,)
+            ).fetchone()
+            if not row:
+                conn.close()
+                return None
+            test = self._attach_last_sync(conn, dict(row))
+            conn.close()
+            return test
+        except Exception as e:
+            print(f"Error getting life test: {e}")
+            return None
+
+    def add_sync_record(self, life_test_id: str, machine_hours: float,
+                        estimated_hours: float, difference_minutes: float,
+                        operator_id: str, notes: str = None) -> dict:
+        """Record an operator sync"""
+        try:
+            sync_id = str(uuid.uuid4())
+            now = datetime.utcnow().isoformat() + 'Z'
+            conn = self.get_connection()
+            conn.execute(
+                "INSERT INTO sync_records (id, life_test_id, machine_hours, estimated_hours, "
+                "difference_minutes, synced_at, operator_id, notes) VALUES (?,?,?,?,?,?,?,?)",
+                (sync_id, life_test_id, machine_hours, estimated_hours, difference_minutes, now, operator_id, notes)
+            )
+            conn.execute("UPDATE life_tests SET updated_at = ? WHERE id = ?", (now, life_test_id))
+            conn.commit()
+            conn.close()
+            return {"success": True, "id": sync_id, "synced_at": now}
+        except Exception as e:
+            return {"success": False, "error": str(e)}
+
+    def get_sync_records(self, life_test_id: str) -> List[dict]:
+        """Get all sync records for a life test (oldest first)"""
+        try:
+            conn = self.get_connection()
+            rows = conn.execute(
+                "SELECT s.*, u.full_name as operator_name FROM sync_records s "
+                "LEFT JOIN users u ON s.operator_id = u.id "
+                "WHERE s.life_test_id = ? ORDER BY s.synced_at ASC",
+                (life_test_id,)
+            ).fetchall()
+            conn.close()
+            return [dict(r) for r in rows]
+        except Exception as e:
+            print(f"Error getting sync records: {e}")
+            return []
+
+    def complete_life_test(self, lt_id: str) -> dict:
+        """Mark a life test as completed and record the completion timestamp"""
+        try:
+            now = datetime.utcnow().isoformat() + 'Z'
+            conn = self.get_connection()
+            conn.execute(
+                "UPDATE life_tests SET status = 'completed', completed_at = ?, updated_at = ? WHERE id = ?",
+                (now, now, lt_id)
+            )
+            conn.commit()
+            conn.close()
+            return {"success": True}
+        except Exception as e:
+            return {"success": False, "error": str(e)}
+
+    def set_ecd(self, lt_id: str, ecd_date: str) -> dict:
+        """Set the Estimated Completion Date (YYYY-MM-DD) for a life test"""
+        try:
+            now = datetime.utcnow().isoformat() + 'Z'
+            conn = self.get_connection()
+            conn.execute(
+                "UPDATE life_tests SET ecd = ?, updated_at = ? WHERE id = ?",
+                (ecd_date if ecd_date else None, now, lt_id)
+            )
+            conn.commit()
+            conn.close()
+            return {"success": True}
+        except Exception as e:
+            return {"success": False, "error": str(e)}
+
+    def advance_running_ecds(self, days: int) -> int:
+        """Push the ECD of every running test forward by `days` calendar days.
+
+        Used on system resume so completion dates account for paused (non-working)
+        days. Only tests that already have an ECD set are affected. Returns the
+        number of tests updated.
+        """
+        if not days or days <= 0:
+            return 0
+        try:
+            now = datetime.utcnow().isoformat() + 'Z'
+            conn = self.get_connection()
+            rows = conn.execute(
+                "SELECT id, ecd FROM life_tests "
+                "WHERE status = 'running' AND ecd IS NOT NULL AND ecd != ''"
+            ).fetchall()
+            count = 0
+            for r in rows:
+                try:
+                    new_ecd = (datetime.strptime(r["ecd"], "%Y-%m-%d")
+                               + timedelta(days=days)).strftime("%Y-%m-%d")
+                    conn.execute(
+                        "UPDATE life_tests SET ecd = ?, updated_at = ? WHERE id = ?",
+                        (new_ecd, now, r["id"])
+                    )
+                    count += 1
+                except Exception:
+                    pass  # skip malformed ECD values
+            conn.commit()
+            conn.close()
+            return count
+        except Exception as e:
+            print(f"Error advancing ECDs: {e}")
+            return 0
+
+    def delete_life_test(self, lt_id: str) -> dict:
+        """Delete a completed life test and all its associated data"""
+        try:
+            conn = self.get_connection()
+            conn.execute("DELETE FROM sync_records WHERE life_test_id = ?", (lt_id,))
+            conn.execute("DELETE FROM life_tests WHERE id = ?", (lt_id,))
+            conn.commit()
+            conn.close()
+            return {"success": True}
+        except Exception as e:
+            return {"success": False, "error": str(e)}
+
+    def get_sync_quality_report(self) -> List[dict]:
+        """Sync quality per life test (excludes the initial sync with diff=0)"""
+        try:
+            conn = self.get_connection()
+            rows = conn.execute(
+                """
+                SELECT lt.id, lt.test_label, lt.product, lt.status,
+                       COUNT(s.id) as total_syncs,
+                       ROUND(AVG(ABS(s.difference_minutes)), 2) as avg_diff_minutes,
+                       ROUND(MAX(ABS(s.difference_minutes)), 2) as max_diff_minutes
+                FROM life_tests lt
+                LEFT JOIN sync_records s ON lt.id = s.life_test_id AND s.difference_minutes != 0
+                GROUP BY lt.id, lt.test_label, lt.product, lt.status
+                ORDER BY lt.created_at DESC
+                """
+            ).fetchall()
+            conn.close()
+            return [dict(r) for r in rows]
+        except Exception as e:
+            print(f"Error getting sync quality: {e}")
+            return []
+
+
+    # ==================== System Pause Methods ====================
+
+    def get_system_state(self) -> dict:
+        """Get current system pause state"""
+        try:
+            conn = self.get_connection()
+            row = conn.execute("SELECT * FROM system_state WHERE id = 1").fetchone()
+            active = conn.execute(
+                "SELECT * FROM system_pause_logs WHERE resume_time IS NULL ORDER BY pause_time DESC LIMIT 1"
+            ).fetchone()
+            total_row = conn.execute(
+                "SELECT COALESCE(SUM(total_paused_minutes), 0) FROM system_pause_logs WHERE total_paused_minutes IS NOT NULL"
+            ).fetchone()
+            conn.close()
+
+            is_paused = bool(row["is_paused"]) if row else False
+            paused_at = row["paused_at"] if row else None
+            paused_by = row["paused_by"] if row else None
+            total_minutes = float(total_row[0]) if total_row else 0.0
+
+            if is_paused and paused_at:
+                pause_start = datetime.fromisoformat(paused_at.rstrip('Z'))
+                total_minutes += (datetime.utcnow() - pause_start).total_seconds() / 60.0
+
+            return {
+                "is_paused": is_paused,
+                "paused_at": paused_at,
+                "paused_by": paused_by,
+                "active_pause_id": dict(active)["id"] if active else None,
+                "total_paused_minutes_ever": round(total_minutes, 2)
+            }
+        except Exception as e:
+            print(f"Error getting system state: {e}")
+            return {"is_paused": False, "paused_at": None, "paused_by": None,
+                    "active_pause_id": None, "total_paused_minutes_ever": 0.0}
+
+    def pause_system(self, operator_id: str, operator_name: str, notes: str = None) -> dict:
+        """Pause all system timers"""
+        try:
+            state = self.get_system_state()
+            if state["is_paused"]:
+                return {"success": False, "error": "System is already paused"}
+            now = datetime.utcnow().isoformat() + 'Z'
+            log_id = str(uuid.uuid4())
+            conn = self.get_connection()
+            conn.execute(
+                "INSERT INTO system_pause_logs (id, operator_id, operator_name, pause_time, notes, created_at) "
+                "VALUES (?, ?, ?, ?, ?, ?)",
+                (log_id, operator_id, operator_name, now, notes, now)
+            )
+            conn.execute(
+                "INSERT OR REPLACE INTO system_state (id, is_paused, paused_at, paused_by, updated_at) "
+                "VALUES (1, 1, ?, ?, ?)",
+                (now, operator_id, now)
+            )
+            conn.commit()
+            conn.close()
+            return {"success": True, "paused_at": now, "pause_id": log_id}
+        except Exception as e:
+            return {"success": False, "error": str(e)}
+
+    def resume_system(self, operator_id: str, operator_name: str, notes: str = None) -> dict:
+        """Resume all system timers"""
+        try:
+            state = self.get_system_state()
+            if not state["is_paused"]:
+                return {"success": False, "error": "System is not paused"}
+            now = datetime.utcnow().isoformat() + 'Z'
+            now_dt = datetime.fromisoformat(now.rstrip('Z'))
+            conn = self.get_connection()
+            active = conn.execute(
+                "SELECT * FROM system_pause_logs WHERE resume_time IS NULL ORDER BY pause_time DESC LIMIT 1"
+            ).fetchone()
+            duration_minutes = 0.0
+            if active:
+                pause_start = datetime.fromisoformat(dict(active)["pause_time"].rstrip('Z'))
+                duration_minutes = (now_dt - pause_start).total_seconds() / 60.0
+                conn.execute(
+                    "UPDATE system_pause_logs SET resume_time = ?, total_paused_minutes = ? WHERE id = ?",
+                    (now, round(duration_minutes, 4), dict(active)["id"])
+                )
+            conn.execute(
+                "INSERT OR REPLACE INTO system_state (id, is_paused, paused_at, paused_by, updated_at) "
+                "VALUES (1, 0, NULL, NULL, ?)",
+                (now,)
+            )
+            conn.commit()
+            conn.close()
+            return {"success": True, "resumed_at": now, "total_paused_minutes": round(duration_minutes, 4)}
+        except Exception as e:
+            return {"success": False, "error": str(e)}
+
+    def get_pause_logs(self, limit: int = 100) -> List[dict]:
+        """Get all pause/resume log entries newest first"""
+        try:
+            conn = self.get_connection()
+            rows = conn.execute(
+                "SELECT * FROM system_pause_logs ORDER BY pause_time DESC LIMIT ?", (limit,)
+            ).fetchall()
+            conn.close()
+            return [dict(r) for r in rows]
+        except Exception as e:
+            print(f"Error fetching pause logs: {e}")
+            return []
+
+    def get_paused_seconds_between(self, since_iso: str, until_iso: str) -> float:
+        """
+        Return total seconds the system was paused within the [since_iso, until_iso] window.
+        Only counts completed pause intervals (resume_time IS NOT NULL) within this window.
+        """
+        try:
+            since_dt = datetime.fromisoformat(since_iso.rstrip('Z'))
+            until_dt = datetime.fromisoformat(until_iso.rstrip('Z'))
+            if until_dt <= since_dt:
+                return 0.0
+            conn = self.get_connection()
+            rows = conn.execute(
+                """
+                SELECT pause_time, resume_time
+                FROM system_pause_logs
+                WHERE resume_time IS NOT NULL
+                  AND pause_time < ?
+                  AND resume_time > ?
+                """,
+                (until_iso, since_iso)
+            ).fetchall()
+            conn.close()
+            total = 0.0
+            for row in rows:
+                p_start = datetime.fromisoformat(row[0].rstrip('Z'))
+                p_end   = datetime.fromisoformat(row[1].rstrip('Z'))
+                eff_start = max(p_start, since_dt)
+                eff_end   = min(p_end,   until_dt)
+                if eff_end > eff_start:
+                    total += (eff_end - eff_start).total_seconds()
+            return total
+        except Exception as e:
+            print(f"Error computing paused seconds: {e}")
+            return 0.0
+
+
+db = LocalDB()
+
+
+
+

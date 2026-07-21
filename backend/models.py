@@ -10,11 +10,14 @@ class UserRole(str, Enum):
     ADMIN = "admin"
 
 class UserRegister(BaseModel):
-    """User registration model"""
+    """User registration model.
+
+    Note: role is intentionally NOT a field here. Self-registration always
+    creates an 'operator'; elevated roles are assigned by an administrator.
+    """
     email: EmailStr
     password: str
     full_name: str
-    role: UserRole = UserRole.OPERATOR
 
 class UserLogin(BaseModel):
     """User login model"""
@@ -141,3 +144,45 @@ class TestingSessionWithOnHours(BaseModel):
     notes: Optional[str] = None
     created_at: datetime
     updated_at: datetime
+
+
+# ==================== Life Test Models ====================
+
+class LifeTestCreate(BaseModel):
+    """Create a new life test"""
+    test_label: str                        # e.g. LT001
+    product: str                           # product name / model
+    on_minutes: float = 8.0               # ON duration per cycle
+    off_minutes: float = 2.0              # OFF duration per cycle
+    target_hours: int = 468               # target ON hours
+    initial_machine_hours: float = 0.0   # current machine reading at test start
+    notes: Optional[str] = None
+
+
+class SyncInput(BaseModel):
+    """Operator submits a sync reading from the machine display"""
+    machine_hours: int    # hours shown on machine
+    machine_minutes: int  # minutes shown on machine
+    notes: Optional[str] = None
+
+
+class ECDInput(BaseModel):
+    """Set the Estimated Completion Date"""
+    ecd_date: str  # YYYY-MM-DD  (empty string to clear)
+
+
+# ==================== System Pause Models ====================
+
+class SystemPauseRequest(BaseModel):
+    """Request to pause or resume all system timers"""
+    notes: Optional[str] = None
+
+
+class SystemStateResponse(BaseModel):
+    """Current system pause state"""
+    is_paused: bool
+    paused_at: Optional[datetime]
+    paused_by: Optional[str]
+    active_pause_id: Optional[str]
+    total_paused_minutes_ever: float
+
