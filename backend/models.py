@@ -186,3 +186,16 @@ class SystemStateResponse(BaseModel):
     active_pause_id: Optional[str]
     total_paused_minutes_ever: float
 
+
+# ==================== Per-Slot (Life Test) Pause Models ====================
+
+class LifeTestPauseRequest(BaseModel):
+    """Pause a single life test (slot). A non-empty reason is mandatory and is
+    stored in the slot's pause history."""
+    reason: str
+
+
+class LifeTestResumeRequest(BaseModel):
+    """Resume a single life test (slot). No fields are required."""
+    notes: Optional[str] = None
+

@@ -14,7 +14,8 @@ from models import (
     TestingTimeEntry, TestingTimeResponse, CyclePattern, TimeSeriesData,
     DataUploadWithOnHours, TestingSessionWithOnHours,
     LifeTestCreate, SyncInput, ECDInput,
-    SystemPauseRequest, SystemStateResponse
+    SystemPauseRequest, SystemStateResponse,
+    LifeTestPauseRequest, LifeTestResumeRequest
 )
 from database import db
 from auth import (
@@ -483,6 +484,25 @@ def _get_effective_now(system_state: dict) -> datetime:
     return datetime.utcnow()
 
 
+def _test_effective_now(test: dict, system_state: dict) -> datetime:
+    """Effective 'now' for a single life test — frozen at the EARLIEST active
+    pause that affects it: its own per-slot pause and/or a system-wide pause.
+    Freezing at the earliest keeps the counter and the excluded paused time
+    consistent when both apply."""
+    candidates = [datetime.utcnow()]
+    if test.get("status") == "paused" and test.get("paused_at"):
+        try:
+            candidates.append(datetime.fromisoformat(test["paused_at"].rstrip('Z')))
+        except Exception:
+            pass
+    if system_state.get("is_paused") and system_state.get("paused_at"):
+        try:
+            candidates.append(datetime.fromisoformat(system_state["paused_at"].rstrip('Z')))
+        except Exception:
+            pass
+    return min(candidates)
+
+
 @app.post("/api/life-tests")
 async def create_life_test(
     payload: LifeTestCreate,
@@ -509,19 +529,24 @@ async def list_life_tests(
     test_status: str = None,
     current_user: TokenData = Depends(get_current_user)
 ):
-    """List all life tests with pause-aware estimated hours"""
+    """List all life tests with pause-aware estimated hours (system + per-slot)"""
     tests = db.get_life_tests(status=test_status)
     system_state = db.get_system_state()
-    effective_now = _get_effective_now(system_state)
-    effective_now_iso = effective_now.isoformat() + 'Z'
 
     for test in tests:
+        # Each test freezes at its own effective 'now' (its own pause or a
+        # system pause, whichever started first).
+        effective_now = _test_effective_now(test, system_state)
+        effective_now_iso = effective_now.isoformat() + 'Z'
+
         paused_sec = 0.0
-        if test.get("last_sync") and test["status"] == "running":
-            paused_sec = db.get_paused_seconds_between(
-                test["last_sync"]["synced_at"], effective_now_iso
+        if test.get("last_sync") and test["status"] in ("running", "paused"):
+            paused_sec = db.get_effective_paused_seconds(
+                test["id"], test["last_sync"]["synced_at"], effective_now_iso
             )
         test["paused_seconds_since_sync"] = paused_sec
+        test["is_paused"] = test["status"] == "paused"
+        test["slot_total_paused_seconds"] = db.get_test_own_paused_seconds(test["id"])
         test["system_is_paused"] = system_state["is_paused"]
         test["system_paused_at"] = system_state["paused_at"]
 
@@ -539,14 +564,14 @@ async def get_life_test(
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Life test not found")
 
     system_state = db.get_system_state()
-    effective_now = _get_effective_now(system_state)
+    effective_now = _test_effective_now(test, system_state)
     effective_now_iso = effective_now.isoformat() + 'Z'
 
     estimated_hours = None
     paused_sec = 0.0
-    if test.get("last_sync") and test["status"] == "running":
-        paused_sec = db.get_paused_seconds_between(
-            test["last_sync"]["synced_at"], effective_now_iso
+    if test.get("last_sync") and test["status"] in ("running", "paused"):
+        paused_sec = db.get_effective_paused_seconds(
+            test["id"], test["last_sync"]["synced_at"], effective_now_iso
         )
         estimated_hours = _estimate_hours(
             test["last_sync"]["machine_hours"],
@@ -568,7 +593,9 @@ async def get_life_test(
 
     test["estimated_hours"] = estimated_hours
     test["paused_seconds_since_sync"] = paused_sec
-    test["total_paused_seconds"] = total_paused_seconds
+    test["total_paused_seconds"] = total_paused_seconds           # system-pause time in window
+    test["slot_total_paused_seconds"] = db.get_test_own_paused_seconds(lt_id)  # this slot's own pauses
+    test["is_paused"] = test["status"] == "paused"
     test["system_is_paused"] = system_state["is_paused"]
     test["system_paused_at"] = system_state["paused_at"]
     return test
@@ -725,6 +752,79 @@ async def delete_life_test(
     if not result["success"]:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=result["error"])
     return {"message": "Life test deleted successfully"}
+
+
+# ==================== Per-Slot (Life Test) Pause Routes ====================
+
+@app.post("/api/life-tests/{lt_id}/pause")
+async def pause_life_test(
+    lt_id: str,
+    req: LifeTestPauseRequest,
+    current_user: TokenData = Depends(get_current_operator)
+):
+    """Pause a single life test / slot (operator or admin).
+
+    A non-empty reason is mandatory — it is recorded in the slot's pause history.
+    Pausing one slot does not affect any other slot.
+    """
+    if not (req.reason or "").strip():
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="A pause reason is required"
+        )
+    user = db.get_user_by_id(current_user.user_id)
+    operator_name = user["full_name"] if user else current_user.user_id
+    result = db.pause_life_test(lt_id, current_user.user_id, operator_name, req.reason)
+    if not result["success"]:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=result["error"])
+    logger.info(f"Slot {lt_id} PAUSED by {operator_name}: {result['reason']}")
+    return {
+        "message": "Slot paused — timer frozen",
+        "paused_at": result["paused_at"],
+        "paused_by": operator_name,
+        "reason": result["reason"],
+        "pause_id": result["pause_id"]
+    }
+
+
+@app.post("/api/life-tests/{lt_id}/resume")
+async def resume_life_test(
+    lt_id: str,
+    req: LifeTestResumeRequest,
+    current_user: TokenData = Depends(get_current_operator)
+):
+    """Resume a paused life test / slot (operator or admin).
+
+    Ends the pause period, accumulates the paused duration (excluded from
+    effective testing time), and continues the timer from where it stopped.
+    """
+    user = db.get_user_by_id(current_user.user_id)
+    operator_name = user["full_name"] if user else current_user.user_id
+    result = db.resume_life_test(lt_id, current_user.user_id, operator_name)
+    if not result["success"]:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=result["error"])
+    logger.info(f"Slot {lt_id} RESUMED by {operator_name} "
+                f"(paused {result['total_paused_minutes']} min)")
+    return {
+        "message": "Slot resumed — timer continues",
+        "resumed_at": result["resumed_at"],
+        "resumed_by": operator_name,
+        "total_paused_minutes": result["total_paused_minutes"]
+    }
+
+
+@app.get("/api/life-tests/{lt_id}/pause-logs")
+async def get_life_test_pause_logs(
+    lt_id: str,
+    limit: int = 100,
+    current_user: TokenData = Depends(get_current_user)
+):
+    """Get the pause history for a single slot (any authenticated user)."""
+    test = db.get_life_test(lt_id)
+    if not test:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Life test not found")
+    logs = db.get_test_pause_logs(lt_id, limit)
+    return {"logs": logs, "count": len(logs)}
 
 
 @app.get("/api/reports/sync-quality")

@@ -75,6 +75,11 @@ class LabDataAPI {
     }
     getSyncs(lifeTestId) { return this.request('GET', `/life-tests/${lifeTestId}/syncs`); }
 
+    // ── Per-Slot Pause ──
+    pauseLifeTest(id, reason)  { return this.request('POST', `/life-tests/${id}/pause`,  { reason }); }
+    resumeLifeTest(id, notes = '') { return this.request('POST', `/life-tests/${id}/resume`, { notes }); }
+    getTestPauseLogs(id, limit = 100) { return this.request('GET', `/life-tests/${id}/pause-logs?limit=${limit}`); }
+
     // ── Reports ──
     getSyncQualityReport() { return this.request('GET', '/reports/sync-quality'); }
 

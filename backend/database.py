@@ -122,13 +122,30 @@ class LocalDB:
                 notes TEXT,
                 created_at TEXT DEFAULT (datetime('now'))
             );
+
+            -- Per-slot (individual life test) pause/resume audit log.
+            -- Independent from system_pause_logs: each life test manages its
+            -- own pause state, used for the 132-hour maintenance inspections.
+            CREATE TABLE IF NOT EXISTS life_test_pause_logs (
+                id TEXT PRIMARY KEY,
+                life_test_id TEXT NOT NULL REFERENCES life_tests(id) ON DELETE CASCADE,
+                operator_id TEXT REFERENCES users(id),
+                operator_name TEXT,
+                pause_time TEXT NOT NULL,
+                resume_time TEXT,
+                total_paused_minutes REAL,
+                reason TEXT NOT NULL,
+                created_at TEXT DEFAULT (datetime('now'))
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_lt_pause_logs_test ON life_test_pause_logs(life_test_id);
         """)
         conn.commit()
         conn.close()
 
         # Migrate existing databases: add new columns if absent
         conn2 = self.get_connection()
-        for col in ('completed_at', 'ecd'):
+        for col in ('completed_at', 'ecd', 'paused_at'):
             try:
                 conn2.execute(f"ALTER TABLE life_tests ADD COLUMN {col} TEXT")
                 conn2.commit()
@@ -918,6 +935,186 @@ class LocalDB:
             return total
         except Exception as e:
             print(f"Error computing paused seconds: {e}")
+            return 0.0
+
+    # ==================== Per-Slot (Life Test) Pause Methods ====================
+
+    def pause_life_test(self, lt_id: str, operator_id: str, operator_name: str,
+                        reason: str) -> dict:
+        """Pause a single life test (slot). A non-empty reason is mandatory."""
+        reason = (reason or "").strip()
+        if not reason:
+            return {"success": False, "error": "A pause reason is required"}
+        try:
+            conn = self.get_connection()
+            row = conn.execute("SELECT status FROM life_tests WHERE id = ?", (lt_id,)).fetchone()
+            if not row:
+                conn.close()
+                return {"success": False, "error": "Life test not found"}
+            if row["status"] != "running":
+                conn.close()
+                return {"success": False, "error": "Only running tests can be paused"}
+
+            now = datetime.utcnow().isoformat() + 'Z'
+            log_id = str(uuid.uuid4())
+            conn.execute(
+                "INSERT INTO life_test_pause_logs "
+                "(id, life_test_id, operator_id, operator_name, pause_time, reason, created_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (log_id, lt_id, operator_id, operator_name, now, reason, now)
+            )
+            conn.execute(
+                "UPDATE life_tests SET status = 'paused', paused_at = ?, updated_at = ? WHERE id = ?",
+                (now, now, lt_id)
+            )
+            conn.commit()
+            conn.close()
+            return {"success": True, "paused_at": now, "pause_id": log_id, "reason": reason}
+        except Exception as e:
+            return {"success": False, "error": str(e)}
+
+    def resume_life_test(self, lt_id: str, operator_id: str, operator_name: str) -> dict:
+        """Resume a paused life test (slot), closing the open pause log and
+        accumulating its duration. The test timer continues from where it stopped."""
+        try:
+            conn = self.get_connection()
+            row = conn.execute("SELECT status, paused_at FROM life_tests WHERE id = ?", (lt_id,)).fetchone()
+            if not row:
+                conn.close()
+                return {"success": False, "error": "Life test not found"}
+            if row["status"] != "paused":
+                conn.close()
+                return {"success": False, "error": "Test is not paused"}
+
+            now = datetime.utcnow().isoformat() + 'Z'
+            now_dt = datetime.fromisoformat(now.rstrip('Z'))
+            active = conn.execute(
+                "SELECT * FROM life_test_pause_logs "
+                "WHERE life_test_id = ? AND resume_time IS NULL ORDER BY pause_time DESC LIMIT 1",
+                (lt_id,)
+            ).fetchone()
+            duration_minutes = 0.0
+            if active:
+                pause_start = datetime.fromisoformat(dict(active)["pause_time"].rstrip('Z'))
+                duration_minutes = (now_dt - pause_start).total_seconds() / 60.0
+                conn.execute(
+                    "UPDATE life_test_pause_logs SET resume_time = ?, total_paused_minutes = ? WHERE id = ?",
+                    (now, round(duration_minutes, 4), dict(active)["id"])
+                )
+            conn.execute(
+                "UPDATE life_tests SET status = 'running', paused_at = NULL, updated_at = ? WHERE id = ?",
+                (now, lt_id)
+            )
+            conn.commit()
+            conn.close()
+            return {"success": True, "resumed_at": now, "total_paused_minutes": round(duration_minutes, 4)}
+        except Exception as e:
+            return {"success": False, "error": str(e)}
+
+    def get_test_pause_logs(self, lt_id: str, limit: int = 100) -> List[dict]:
+        """Get the pause/resume history for a single life test (newest first)."""
+        try:
+            conn = self.get_connection()
+            rows = conn.execute(
+                "SELECT p.*, u.full_name as user_full_name FROM life_test_pause_logs p "
+                "LEFT JOIN users u ON p.operator_id = u.id "
+                "WHERE p.life_test_id = ? ORDER BY p.pause_time DESC LIMIT ?",
+                (lt_id, limit)
+            ).fetchall()
+            conn.close()
+            return [dict(r) for r in rows]
+        except Exception as e:
+            print(f"Error fetching test pause logs: {e}")
+            return []
+
+    def _collect_closed_intervals(self, conn, lt_id: str) -> List[tuple]:
+        """Return (start_dt, end_dt) tuples for every CLOSED pause interval that
+        freezes this test's timeline: system-wide pauses PLUS this slot's own pauses.
+        Open (in-progress) pauses are excluded — the caller freezes 'now' instead."""
+        intervals = []
+        sys_rows = conn.execute(
+            "SELECT pause_time, resume_time FROM system_pause_logs WHERE resume_time IS NOT NULL"
+        ).fetchall()
+        slot_rows = conn.execute(
+            "SELECT pause_time, resume_time FROM life_test_pause_logs "
+            "WHERE life_test_id = ? AND resume_time IS NOT NULL",
+            (lt_id,)
+        ).fetchall()
+        for r in list(sys_rows) + list(slot_rows):
+            try:
+                intervals.append((
+                    datetime.fromisoformat(r[0].rstrip('Z')),
+                    datetime.fromisoformat(r[1].rstrip('Z'))
+                ))
+            except Exception:
+                pass
+        return intervals
+
+    def get_effective_paused_seconds(self, lt_id: str, since_iso: str, until_iso: str) -> float:
+        """Total seconds this test's timeline was frozen within [since, until].
+
+        Unions system-wide pauses with this slot's own pauses (merging any overlap,
+        e.g. a slot under maintenance across a factory off-day) so paused time is
+        never double-counted when excluded from effective testing time.
+        """
+        try:
+            since_dt = datetime.fromisoformat(since_iso.rstrip('Z'))
+            until_dt = datetime.fromisoformat(until_iso.rstrip('Z'))
+            if until_dt <= since_dt:
+                return 0.0
+            conn = self.get_connection()
+            intervals = self._collect_closed_intervals(conn, lt_id)
+            conn.close()
+
+            # Clip each interval to the window
+            clipped = []
+            for s, e in intervals:
+                cs = max(s, since_dt)
+                ce = min(e, until_dt)
+                if ce > cs:
+                    clipped.append((cs, ce))
+            if not clipped:
+                return 0.0
+
+            # Merge overlapping intervals, then sum
+            clipped.sort()
+            total = 0.0
+            cur_s, cur_e = clipped[0]
+            for s, e in clipped[1:]:
+                if s <= cur_e:
+                    cur_e = max(cur_e, e)
+                else:
+                    total += (cur_e - cur_s).total_seconds()
+                    cur_s, cur_e = s, e
+            total += (cur_e - cur_s).total_seconds()
+            return total
+        except Exception as e:
+            print(f"Error computing effective paused seconds: {e}")
+            return 0.0
+
+    def get_test_own_paused_seconds(self, lt_id: str) -> float:
+        """Total time THIS slot has been paused for its own reasons (accumulated
+        across all its pauses), including any currently-open pause in progress."""
+        try:
+            conn = self.get_connection()
+            closed = conn.execute(
+                "SELECT COALESCE(SUM(total_paused_minutes), 0) FROM life_test_pause_logs "
+                "WHERE life_test_id = ? AND total_paused_minutes IS NOT NULL",
+                (lt_id,)
+            ).fetchone()[0]
+            total_sec = float(closed or 0) * 60.0
+            active = conn.execute(
+                "SELECT pause_time FROM life_test_pause_logs "
+                "WHERE life_test_id = ? AND resume_time IS NULL ORDER BY pause_time DESC LIMIT 1",
+                (lt_id,)
+            ).fetchone()
+            conn.close()
+            if active:
+                ps = datetime.fromisoformat(active[0].rstrip('Z'))
+                total_sec += max(0.0, (datetime.utcnow() - ps).total_seconds())
+            return round(total_sec, 2)
+        except Exception as e:
+            print(f"Error computing test own paused seconds: {e}")
             return 0.0
 
 

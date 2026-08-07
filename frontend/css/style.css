@@ -337,6 +337,7 @@ body {
 /* Cards that should span the full width of the detail-left grid */
 .detail-left > .detail-card:has(.detail-meta),
 .detail-left > .sync-info-card,
+.detail-left > #slotPauseCard,
 .detail-left > #syncFormCard,
 .detail-left > #completeTestCard,
 .detail-left > #deleteTestCard { grid-column: 1 / -1; }
@@ -518,6 +519,41 @@ body {
     from { transform: translateY(8px) scale(.98); opacity: 0; }
     to   { transform: none; opacity: 1; }
 }
+
+/* Pause reason dialog */
+.pause-reason-input {
+    width: 100%; box-sizing: border-box;
+    border: 1.5px solid var(--border); border-radius: 9px;
+    padding: 10px 12px; font-size: 14px; font-family: inherit;
+    resize: vertical; min-height: 64px; margin-bottom: 8px;
+    background: var(--bg); color: var(--text);
+}
+.pause-reason-input:focus { outline: none; border-color: var(--warning); }
+.pause-reason-error { color: var(--danger); font-size: 13px; font-weight: 600; margin-bottom: 12px; text-align: left; }
+
+/* ═══════════════════════════════
+   PER-SLOT PAUSE
+═══════════════════════════════ */
+.test-card-actions { margin-top: 14px; }
+.card-pause-btn { width: 100%; }
+
+.slot-pause-active {
+    background: var(--warning-lt); color: #92400e;
+    border: 1px solid #fcd34d; border-radius: 9px;
+    padding: 10px 12px; margin-bottom: 12px;
+    font-size: 13px; line-height: 1.5;
+}
+.slot-pause-active strong { font-weight: 800; }
+.slot-pause-reason { font-weight: 600; }
+
+.pause-ongoing-tag {
+    display: inline-block; margin-left: 6px;
+    background: var(--warning); color: #fff;
+    font-size: 10px; font-weight: 800; letter-spacing: .5px;
+    padding: 1px 7px; border-radius: 99px; vertical-align: middle;
+}
+.timeline-reason { font-size: 13px; color: var(--text-2); margin-top: 2px; }
+.timeline-reason strong { color: var(--text); }
 
 /* ═══════════════════════════════
    EMPTY STATE

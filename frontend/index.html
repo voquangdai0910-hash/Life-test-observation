@@ -4,7 +4,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Life Test Observation</title>
-    <link rel="stylesheet" href="css/style.css?v=310">
+    <link rel="stylesheet" href="css/style.css?v=311">
 </head>
 <body>
 <div id="app">
@@ -165,6 +165,13 @@
                                 </div>
                             </div>
 
+                            <div class="detail-card" id="slotPauseCard" style="display:none;">
+                                <h3>Slot Pause Control</h3>
+                                <p class="sync-form-hint">Pause this slot on its own — e.g. for the 132-hour performance inspection (air performance measurement &amp; dust cleaning). Paused time is excluded from the effective testing time. Pausing this slot does not affect any other slot.</p>
+                                <div id="slotPauseStatus"></div>
+                                <button class="btn btn-warning btn-full" id="slotPauseBtn" onclick="handleSlotPauseToggle()">&#9208; Pause This Slot</button>
+                            </div>
+
                             <div class="detail-card" id="syncFormCard" style="display:none;">
                                 <h3>Sync Machine Reading</h3>
                                 <p class="sync-form-hint">Enter the hours and minutes shown on the machine display.</p>
@@ -210,6 +217,13 @@
                                 <h3>Sync Timeline</h3>
                                 <div id="syncTimeline" class="sync-timeline">
                                     <p class="empty-state">No syncs yet</p>
+                                </div>
+                            </div>
+
+                            <div class="detail-card" id="pauseHistoryCard" style="margin-top:16px;">
+                                <h3>Pause History</h3>
+                                <div id="pauseHistoryList" class="sync-timeline">
+                                    <p class="empty-state">No pauses recorded.</p>
                                 </div>
                             </div>
                         </div>
@@ -349,10 +363,26 @@
     </div>
 </div>
 
+<!-- Pause reason dialog (mandatory reason before a slot can be paused) -->
+<div id="pauseOverlay" class="confirm-overlay" style="display:none;">
+    <div class="confirm-box">
+        <div class="confirm-icon">&#9208;</div>
+        <h3 id="pauseDialogTitle">Pause Slot</h3>
+        <p>Enter the reason for pausing this slot. A reason is required and is saved to the pause history.</p>
+        <textarea id="pauseReasonInput" class="pause-reason-input" rows="3"
+                  placeholder="e.g. 132-hour performance inspection — air performance measurement &amp; dust cleaning"></textarea>
+        <div class="pause-reason-error" id="pauseReasonError" style="display:none;">A reason is required to pause this slot.</div>
+        <div class="confirm-actions">
+            <button class="btn btn-outline" id="pauseCancelBtn">Cancel</button>
+            <button class="btn btn-warning" id="pauseConfirmBtn">Pause Slot</button>
+        </div>
+    </div>
+</div>
+
 <div id="toast" class="toast" style="display:none;"></div>
 
-<script src="js/api.js?v=309"></script>
-<script src="js/app.js?v=309"></script>
+<script src="js/api.js?v=310"></script>
+<script src="js/app.js?v=310"></script>
 </body>
 </html>
 

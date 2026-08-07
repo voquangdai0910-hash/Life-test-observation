@@ -30,6 +30,26 @@ function effectiveNowMs(isPaused, pausedAt) {
     return (isPaused && pausedAt) ? toUtcMs(pausedAt) : Date.now();
 }
 
+/**
+ * Resolve the pause context for a single test/slot.
+ * A slot's timeline freezes if the slot itself is paused OR the whole system is
+ * paused — whichever started first. This keeps each slot independent while still
+ * honouring a global factory off-day pause.
+ * @returns {{isPaused: boolean, pausedAt: string|null}}
+ */
+function testPauseContext(test) {
+    let pausedMs = null;
+    if (test.status === 'paused' && test.paused_at) {
+        pausedMs = toUtcMs(test.paused_at);
+    }
+    if (systemState.is_paused && systemState.paused_at) {
+        const sysMs = toUtcMs(systemState.paused_at);
+        pausedMs = (pausedMs === null) ? sysMs : Math.min(pausedMs, sysMs);
+    }
+    if (pausedMs === null) return { isPaused: false, pausedAt: null };
+    return { isPaused: true, pausedAt: new Date(pausedMs).toISOString() };
+}
+
 /** Calculate ON time accumulated since last sync (seconds), subtracting paused time */
 function calcOnSeconds(syncedAt, onMinutes, offMinutes, pausedSecSinceSync, isPaused, pausedAt) {
     const nowMs  = effectiveNowMs(isPaused, pausedAt);
@@ -139,12 +159,11 @@ function startCounterTick() {
 }
 
 function tick() {
-    const isPaused  = systemState.is_paused;
-    const pausedAt  = systemState.paused_at;
-
-    // Update dashboard cards
+    // Update dashboard cards (running and paused slots; each slot is independent)
     liveTestData.forEach(test => {
-        if (test.status !== 'running' || !test.last_sync) return;
+        if (!test.last_sync) return;
+        if (test.status !== 'running' && test.status !== 'paused') return;
+        const { isPaused, pausedAt } = testPauseContext(test);
         const ls  = test.last_sync;
         const syncedAt = ls.syncedAt || ls.synced_at;
         const psec = test.paused_seconds_since_sync || 0;
@@ -166,9 +185,10 @@ function tick() {
         if (nxtEl) nxtEl.className = (!isPaused && nxt === 0) ? 'overdue' : '';
     });
 
-    // Update detail view — only if test is still running
-    if (currentDetailTest && currentDetailTest.status === 'running' && currentDetailTest.last_sync) {
+    // Update detail view — running or paused (paused shows a frozen counter)
+    if (currentDetailTest && (currentDetailTest.status === 'running' || currentDetailTest.status === 'paused') && currentDetailTest.last_sync) {
         const t  = currentDetailTest;
+        const { isPaused, pausedAt } = testPauseContext(t);
         const ls = t.last_sync;
         const syncedAt = ls.syncedAt || ls.synced_at;
         const psec = t.paused_seconds_since_sync || 0;
@@ -454,6 +474,18 @@ function renderTestCard(test) {
     const syncedAt = ls ? (ls.syncedAt || ls.synced_at) : null;
     const hasSync = !!ls;
     const isRunning = test.status === 'running';
+    const isPausedStatus = test.status === 'paused';
+    const isLive = isRunning || isPausedStatus;   // slot with a live/frozen counter
+
+    const isOp = api.user && (api.user.role === 'operator' || api.user.role === 'admin');
+    const canPause = isOp && isLive;
+    const pauseBtnHtml = canPause ? `
+        <div class="test-card-actions">
+            <button class="btn btn-sm ${isPausedStatus ? 'btn-resume' : 'btn-warning'} card-pause-btn"
+                onclick="handleCardPauseToggle('${esc(test.id)}', event)">
+                ${isPausedStatus ? '&#9654; Resume Slot' : '&#9208; Pause Slot'}
+            </button>
+        </div>` : '';
 
     const duty = test.on_minutes / (test.on_minutes + test.off_minutes) * 100;
     const lastSyncStr = syncedAt ? fmtTime(syncedAt) : 'No sync';
@@ -474,7 +506,7 @@ function renderTestCard(test) {
             <div class="test-card-counter" id="card-est-${test.id}">${hasSync ? fmtHMS(ls.machine_hours) : '--h --m --s'}</div>
 
             <div class="test-card-cycle">
-                ${isRunning && hasSync ? `
+                ${isLive && hasSync ? `
                     <span class="cycle-badge" id="card-state-${test.id}">--</span>
                     <span class="cycle-remain-sm" id="card-remain-${test.id}">--:--</span>
                 ` : '<span style="color:var(--muted);font-size:12px;">' + (test.status === 'completed' ? 'Completed' : 'No sync') + '</span>'}
@@ -495,7 +527,7 @@ function renderTestCard(test) {
                 </div>
                 <div class="meta-item">
                     <span class="meta-label">Next Sync</span>
-                    <span class="meta-val" id="card-next-${test.id}">${isRunning && hasSync ? '...' : '--'}</span>
+                    <span class="meta-val" id="card-next-${test.id}">${isLive && hasSync ? '...' : '--'}</span>
                 </div>
             </div>
 
@@ -505,6 +537,8 @@ function renderTestCard(test) {
                 </div>
                 <span class="progress-label">${hasSync ? fmtHM(ls.machine_hours) : '0h'} / ${test.target_hours}h &nbsp;·&nbsp; ${test.on_minutes}m ON / ${test.off_minutes}m OFF</span>
             </div>
+
+            ${pauseBtnHtml}
         </div>
     </div>`;
 }
@@ -552,9 +586,8 @@ async function openTestDetail(id) {
         const ecdDisplay = isOp && isRunning
             ? `<span class="ecd-picker-wrap">
                    <input type="date" id="ecdInput" value="${esc(ecdValue)}"
+                          onchange="handleSaveECD()"
                           style="font-size:13px;border:1.5px solid var(--border);border-radius:6px;padding:3px 7px;">
-                   <button class="btn btn-sm btn-primary" style="margin-left:6px;"
-                           onclick="handleSaveECD()">Save</button>
                </span>`
             : (ecdValue
                 ? `<span class="meta-val">${esc(ecdValue)}</span>`
@@ -570,7 +603,7 @@ async function openTestDetail(id) {
                 <div><span class="meta-label">Started</span><span class="meta-val">${fmtDateTime(test.created_at)}</span></div>
                 <div><span class="meta-label">Completed Date</span><span class="meta-val">${completedDateStr}</span></div>
                 <div><span class="meta-label">ECD</span>${ecdDisplay}</div>
-                <div><span class="meta-label">Paused Duration (total)</span><span class="meta-val">${fmtDuration(test.total_paused_seconds)}</span></div>
+                <div><span class="meta-label">Slot Paused (total)</span><span class="meta-val">${fmtDuration(test.slot_total_paused_seconds)}</span></div>
             </div>`;
     }
 
@@ -595,14 +628,22 @@ async function openTestDetail(id) {
     }
 
     // Show/hide action buttons based on role and status
-    const syncCard    = document.getElementById('syncFormCard');
-    const completeCard = document.getElementById('completeTestCard');
-    const deleteCard  = document.getElementById('deleteTestCard');
-    if (syncCard)    syncCard.style.display    = (isOp && test.status === 'running')   ? '' : 'none';
-    if (completeCard) completeCard.style.display = (isOp && test.status === 'running')  ? '' : 'none';
-    if (deleteCard)  deleteCard.style.display   = (isOp && test.status === 'completed') ? '' : 'none';
-    // Counter display — frozen for completed tests, live for running
-    if (test.status !== 'running') {
+    const isRunning     = test.status === 'running';
+    const isPausedState = test.status === 'paused';
+    const syncCard      = document.getElementById('syncFormCard');
+    const completeCard   = document.getElementById('completeTestCard');
+    const deleteCard    = document.getElementById('deleteTestCard');
+    const slotPauseCard = document.getElementById('slotPauseCard');
+    // Syncing/completing only while actively running (machine is off the bench while paused)
+    if (syncCard)     syncCard.style.display     = (isOp && isRunning)   ? '' : 'none';
+    if (completeCard)  completeCard.style.display  = (isOp && isRunning)   ? '' : 'none';
+    if (deleteCard)   deleteCard.style.display    = (isOp && test.status === 'completed') ? '' : 'none';
+    // Pause/Resume control for operators on running or paused slots
+    if (slotPauseCard) slotPauseCard.style.display = (isOp && (isRunning || isPausedState)) ? '' : 'none';
+    updateSlotPauseUI(test);
+
+    // Counter display — frozen for completed tests; running/paused handled by tick()
+    if (test.status === 'completed') {
         const frozenHours = ls ? ls.machine_hours : 0;
         setText('detailCounter', fmtHMS(frozenHours));
         const frozenPct = Math.min(frozenHours / test.target_hours * 100, 100);
@@ -618,8 +659,12 @@ async function openTestDetail(id) {
     const syncResultEl = document.getElementById('syncResult');
     if (syncResultEl) syncResultEl.style.display = 'none';
 
-    // Load sync timeline
+    // Load sync timeline and pause history
     loadSyncTimeline(id);
+    loadPauseHistory(id);
+
+    // Immediately render the live/frozen counter for running & paused slots
+    if (test.status === 'running' || test.status === 'paused') tick();
 }
 
 async function loadSyncTimeline(id) {
@@ -724,6 +769,168 @@ async function handleSaveECD() {
         showToast('ECD saved.', 'success');
     } catch(err) {
         showToast('Could not save ECD: ' + err.message, 'error');
+    }
+}
+
+// ==================== Per-Slot Pause ====================
+
+/**
+ * Themed dialog that requires a non-empty pause reason.
+ * @returns {Promise<string|null>} the trimmed reason, or null if cancelled.
+ */
+function pauseReasonDialog(label) {
+    return new Promise(resolve => {
+        const overlay   = document.getElementById('pauseOverlay');
+        if (!overlay) {   // fallback
+            const r = window.prompt('Reason for pausing this slot?');
+            resolve(r && r.trim() ? r.trim() : null);
+            return;
+        }
+        const input     = document.getElementById('pauseReasonInput');
+        const errEl     = document.getElementById('pauseReasonError');
+        const titleEl   = document.getElementById('pauseDialogTitle');
+        const okBtn     = document.getElementById('pauseConfirmBtn');
+        const cancelBtn = document.getElementById('pauseCancelBtn');
+
+        titleEl.textContent = label ? `Pause ${label}` : 'Pause Slot';
+        input.value = '';
+        errEl.style.display = 'none';
+        overlay.style.display = 'flex';
+        setTimeout(() => input.focus(), 30);
+
+        function cleanup(result) {
+            overlay.style.display = 'none';
+            okBtn.removeEventListener('click', onOk);
+            cancelBtn.removeEventListener('click', onCancel);
+            overlay.removeEventListener('click', onBackdrop);
+            document.removeEventListener('keydown', onKey);
+            resolve(result);
+        }
+        function onOk() {
+            const val = input.value.trim();
+            if (!val) { errEl.style.display = ''; input.focus(); return; }  // reason is mandatory
+            cleanup(val);
+        }
+        const onCancel   = () => cleanup(null);
+        const onBackdrop = (e) => { if (e.target === overlay) cleanup(null); };
+        const onKey = (e) => {
+            if (e.key === 'Escape') cleanup(null);
+            else if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) onOk();
+        };
+        okBtn.addEventListener('click', onOk);
+        cancelBtn.addEventListener('click', onCancel);
+        overlay.addEventListener('click', onBackdrop);
+        document.addEventListener('keydown', onKey);
+    });
+}
+
+/** Pause a single slot after collecting a mandatory reason. Returns true if paused. */
+async function doPauseSlot(id, label) {
+    const reason = await pauseReasonDialog(label);
+    if (reason === null) return false;   // cancelled
+    try {
+        await api.pauseLifeTest(id, reason);
+        showToast('Slot paused — timer frozen.', 'warning');
+        return true;
+    } catch (err) {
+        showToast('Pause failed: ' + err.message, 'error');
+        return false;
+    }
+}
+
+/** Resume a single slot (with confirmation). Returns true if resumed. */
+async function doResumeSlot(id, label) {
+    const ok = await confirmDialog({
+        title: `Resume ${label}?`,
+        message: 'This slot\'s timer will continue from where it stopped. The paused time is excluded from the effective testing time.',
+        okText: 'Resume Slot', okClass: 'btn-resume', icon: '&#9654;'
+    });
+    if (!ok) return false;
+    try {
+        const res = await api.resumeLifeTest(id);
+        const paused = res && res.total_paused_minutes != null
+            ? ` Paused for ${fmtDuration(res.total_paused_minutes * 60)}.` : '';
+        showToast('Slot resumed — timer continues.' + paused, 'success');
+        return true;
+    } catch (err) {
+        showToast('Resume failed: ' + err.message, 'error');
+        return false;
+    }
+}
+
+/** Pause/Resume toggle from a dashboard card. */
+async function handleCardPauseToggle(id, event) {
+    if (event) event.stopPropagation();   // don't open the detail view
+    const test = liveTestData.find(t => t.id === id);
+    if (!test) return;
+    const changed = test.status === 'paused'
+        ? await doResumeSlot(id, test.test_label)
+        : await doPauseSlot(id, test.test_label);
+    if (changed) await loadLifeTests();
+}
+
+/** Pause/Resume toggle from the detail view. */
+async function handleSlotPauseToggle() {
+    if (!currentDetailTest) return;
+    const { id, test_label } = currentDetailTest;
+    const changed = currentDetailTest.status === 'paused'
+        ? await doResumeSlot(id, test_label)
+        : await doPauseSlot(id, test_label);
+    if (changed) await openTestDetail(id);
+}
+
+/** Update the detail-view pause button label/style based on slot status. */
+function updateSlotPauseUI(test) {
+    const btn = document.getElementById('slotPauseBtn');
+    if (!btn) return;
+    if (test.status === 'paused') {
+        btn.innerHTML = '&#9654; Resume This Slot';
+        btn.className  = 'btn btn-resume btn-full';
+    } else {
+        btn.innerHTML = '&#9208; Pause This Slot';
+        btn.className  = 'btn btn-warning btn-full';
+    }
+}
+
+/** Load and render the per-slot pause history; also surfaces the active pause banner. */
+async function loadPauseHistory(id) {
+    const list = document.getElementById('pauseHistoryList');
+    if (!list) return;
+    try {
+        const res  = await api.getTestPauseLogs(id);
+        const logs = res.logs || [];
+
+        // Active-pause banner inside the pause control card
+        const active   = logs.find(l => !l.resume_time);
+        const statusEl = document.getElementById('slotPauseStatus');
+        if (statusEl) {
+            statusEl.innerHTML = active
+                ? `<div class="slot-pause-active"><strong>&#9208; Paused</strong> since ${fmtDateTime(active.pause_time)}
+                     <br><span class="slot-pause-reason">Reason: ${esc(active.reason)}</span></div>`
+                : '';
+        }
+
+        if (logs.length === 0) { list.innerHTML = '<p class="empty-state">No pauses recorded.</p>'; return; }
+        list.innerHTML = logs.map(l => {
+            const ongoing = !l.resume_time;
+            const durSec  = l.total_paused_minutes != null
+                ? l.total_paused_minutes * 60
+                : (ongoing ? (Date.now() - toUtcMs(l.pause_time)) / 1000 : 0);
+            const operator = l.operator_name || l.user_full_name;
+            return `
+            <div class="timeline-item">
+                <div class="timeline-dot ${ongoing ? 'latest' : ''}"></div>
+                <div class="timeline-content">
+                    <div class="timeline-time">${fmtDateTime(l.pause_time)}${ongoing ? '<span class="pause-ongoing-tag">ONGOING</span>' : ''}</div>
+                    <div class="timeline-machine">Duration: <strong>${ongoing ? 'in progress' : fmtDuration(durSec)}</strong></div>
+                    ${l.resume_time ? `<div class="timeline-est">Resumed: ${fmtDateTime(l.resume_time)}</div>` : ''}
+                    <div class="timeline-reason"><strong>Reason:</strong> ${esc(l.reason)}</div>
+                    ${operator ? `<div class="timeline-est">Operator: ${esc(operator)}</div>` : ''}
+                </div>
+            </div>`;
+        }).join('');
+    } catch (err) {
+        list.innerHTML = '<p class="empty-state error">Could not load pause history.</p>';
     }
 }
 
