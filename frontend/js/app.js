@@ -752,7 +752,7 @@ async function handleDeleteTest() {
         currentDetailTest = null;
         showToast(`"${label}" deleted successfully.`, 'success');
         // Return to dashboard and refresh
-        showSection('dashboard', document.querySelector('.nav-item'));
+        showSection('dashboard', document.getElementById('navDashboard'));
     } catch(err) {
         showToast('Delete failed: ' + err.message, 'error');
     }
@@ -978,7 +978,7 @@ async function handleCreateTest(e) {
         await api.createLifeTest(payload);
         showToast(`Life test ${payload.test_label} created!`, 'success');
         e.target.reset();
-        showSection('dashboard', document.querySelector('.nav-item'));
+        showSection('dashboard', document.getElementById('navDashboard'));
     } catch(err) {
         showToast('Error: ' + err.message, 'error');
     }

@@ -82,8 +82,8 @@
         <div class="layout">
             <aside class="sidebar">
                 <nav>
-                    <a class="nav-item active" onclick="showSection('dashboard', this)"><span class="nav-icon">&#128202;</span> Dashboard</a>
                     <a class="nav-item" id="navNewTest" onclick="showSection('newTest', this)" style="display:none;"><span class="nav-icon">&#10133;</span> New Life Test</a>
+                    <a class="nav-item active" id="navDashboard" onclick="showSection('dashboard', this)"><span class="nav-icon">&#128202;</span> Dashboard</a>
                     <a class="nav-item" id="navReports" onclick="showSection('reports', this)" style="display:none;"><span class="nav-icon">&#128203;</span> Sync Reports</a>
                     <a class="nav-item" id="navSettings" onclick="showSection('settings', this)" style="display:none;"><span class="nav-icon">&#9881;</span> Settings</a>
                 </nav>
@@ -117,7 +117,7 @@
                 <!-- TEST DETAIL -->
                 <section id="detailSection" class="section">
                     <div class="section-header">
-                        <button class="btn btn-sm btn-outline" onclick="showSection('dashboard', document.querySelector('.nav-item'))">Back</button>
+                        <button class="btn btn-sm btn-outline" onclick="showSection('dashboard', document.getElementById('navDashboard'))">Back</button>
                         <h2 id="detailTitle">Test Detail</h2>
                         <span id="detailStatusBadge" class="status-badge"></span>
                     </div>
@@ -382,7 +382,7 @@
 <div id="toast" class="toast" style="display:none;"></div>
 
 <script src="js/api.js?v=310"></script>
-<script src="js/app.js?v=310"></script>
+<script src="js/app.js?v=311"></script>
 </body>
 </html>
 
