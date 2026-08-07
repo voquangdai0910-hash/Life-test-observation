@@ -139,18 +139,41 @@ class LocalDB:
             );
 
             CREATE INDEX IF NOT EXISTS idx_lt_pause_logs_test ON life_test_pause_logs(life_test_id);
+
+            -- Audit trail for every ECD create/edit. The ECD may be created once
+            -- and corrected at most once within 7 days; this log records both.
+            CREATE TABLE IF NOT EXISTS ecd_audit_logs (
+                id TEXT PRIMARY KEY,
+                life_test_id TEXT NOT NULL REFERENCES life_tests(id) ON DELETE CASCADE,
+                action TEXT NOT NULL,            -- 'create' | 'edit'
+                old_ecd TEXT,
+                new_ecd TEXT,
+                changed_at TEXT NOT NULL,
+                operator_id TEXT REFERENCES users(id),
+                operator_name TEXT,
+                is_one_time_edit INTEGER NOT NULL DEFAULT 0,
+                created_at TEXT DEFAULT (datetime('now'))
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_ecd_audit_test ON ecd_audit_logs(life_test_id);
         """)
         conn.commit()
         conn.close()
 
         # Migrate existing databases: add new columns if absent
         conn2 = self.get_connection()
-        for col in ('completed_at', 'ecd', 'paused_at'):
+        for col in ('completed_at', 'ecd', 'paused_at',
+                    'ecd_original', 'ecd_created_at', 'ecd_created_by'):
             try:
                 conn2.execute(f"ALTER TABLE life_tests ADD COLUMN {col} TEXT")
                 conn2.commit()
             except Exception:
                 pass  # column already exists
+        try:
+            conn2.execute("ALTER TABLE life_tests ADD COLUMN ecd_edited INTEGER DEFAULT 0")
+            conn2.commit()
+        except Exception:
+            pass  # column already exists
         conn2.close()
     
     # ==================== User Methods ====================
@@ -712,20 +735,108 @@ class LocalDB:
         except Exception as e:
             return {"success": False, "error": str(e)}
 
-    def set_ecd(self, lt_id: str, ecd_date: str) -> dict:
-        """Set the Estimated Completion Date (YYYY-MM-DD) for a life test"""
+    # Number of days the initial ECD stays editable (one correction only).
+    ECD_EDIT_WINDOW_DAYS = 7
+    ECD_LOCK_MESSAGE = ("The ECD can only be modified once within 7 days "
+                        "of its initial creation.")
+
+    def set_ecd(self, lt_id: str, ecd_date: str,
+                operator_id: str = None, operator_name: str = None) -> dict:
+        """Create or edit a life test's Estimated Completion Date, enforcing the
+        business rule server-side:
+
+          * First non-empty set = initial creation (records original value,
+            timestamp and author).
+          * Exactly one edit is allowed, and only within 7 days of creation.
+          * After that edit, or once 7 days elapse, the ECD is permanently locked.
+
+        Every create/edit is written to ecd_audit_logs.
+        """
         try:
-            now = datetime.utcnow().isoformat() + 'Z'
+            ecd_date = (ecd_date or "").strip()
             conn = self.get_connection()
+            row = conn.execute(
+                "SELECT ecd, ecd_created_at, ecd_edited FROM life_tests WHERE id = ?",
+                (lt_id,)
+            ).fetchone()
+            if not row:
+                conn.close()
+                return {"success": False, "error": "Life test not found"}
+            row = dict(row)
+
+            now = datetime.utcnow().isoformat() + 'Z'
+            now_dt = datetime.fromisoformat(now.rstrip('Z'))
+            created_at = row.get("ecd_created_at")
+            edited = bool(row.get("ecd_edited"))
+            current_ecd = row.get("ecd") or ""
+
+            # ── Initial creation ──
+            if not created_at:
+                if not ecd_date:
+                    conn.close()
+                    return {"success": True, "ecd": "", "action": "none"}  # nothing to create
+                audit_id = str(uuid.uuid4())
+                conn.execute(
+                    "UPDATE life_tests SET ecd = ?, ecd_original = ?, ecd_created_at = ?, "
+                    "ecd_created_by = ?, ecd_edited = 0, updated_at = ? WHERE id = ?",
+                    (ecd_date, ecd_date, now, operator_id, now, lt_id)
+                )
+                conn.execute(
+                    "INSERT INTO ecd_audit_logs (id, life_test_id, action, old_ecd, new_ecd, "
+                    "changed_at, operator_id, operator_name, is_one_time_edit, created_at) "
+                    "VALUES (?,?,?,?,?,?,?,?,?,?)",
+                    (audit_id, lt_id, 'create', None, ecd_date, now, operator_id, operator_name, 0, now)
+                )
+                conn.commit()
+                conn.close()
+                return {"success": True, "ecd": ecd_date, "action": "create"}
+
+            # ── Already created: only a single edit within the window is allowed ──
+            created_dt = datetime.fromisoformat(created_at.rstrip('Z'))
+            window_end = created_dt + timedelta(days=self.ECD_EDIT_WINDOW_DAYS)
+            locked = edited or (now_dt > window_end)
+            if locked:
+                conn.close()
+                return {"success": False, "error": self.ECD_LOCK_MESSAGE, "locked": True}
+
+            if not ecd_date:
+                conn.close()
+                return {"success": False, "error": "ECD cannot be cleared once it has been set."}
+
+            if ecd_date == current_ecd:
+                conn.close()
+                return {"success": True, "ecd": current_ecd, "action": "none"}  # no change, edit not consumed
+
+            audit_id = str(uuid.uuid4())
             conn.execute(
-                "UPDATE life_tests SET ecd = ?, updated_at = ? WHERE id = ?",
-                (ecd_date if ecd_date else None, now, lt_id)
+                "UPDATE life_tests SET ecd = ?, ecd_edited = 1, updated_at = ? WHERE id = ?",
+                (ecd_date, now, lt_id)
+            )
+            conn.execute(
+                "INSERT INTO ecd_audit_logs (id, life_test_id, action, old_ecd, new_ecd, "
+                "changed_at, operator_id, operator_name, is_one_time_edit, created_at) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?)",
+                (audit_id, lt_id, 'edit', current_ecd, ecd_date, now, operator_id, operator_name, 1, now)
             )
             conn.commit()
             conn.close()
-            return {"success": True}
+            return {"success": True, "ecd": ecd_date, "action": "edit"}
         except Exception as e:
             return {"success": False, "error": str(e)}
+
+    def get_ecd_audit_logs(self, lt_id: str) -> List[dict]:
+        """Return the ECD change history for a life test (newest first)."""
+        try:
+            conn = self.get_connection()
+            rows = conn.execute(
+                "SELECT * FROM ecd_audit_logs WHERE life_test_id = ? ORDER BY changed_at DESC",
+                (lt_id,)
+            ).fetchall()
+            conn.close()
+            return [dict(r) for r in rows]
+        except Exception as e:
+            print(f"Error fetching ECD audit logs: {e}")
+            return []
 
     def advance_running_ecds(self, days: int) -> int:
         """Push the ECD of every running test forward by `days` calendar days.

@@ -581,17 +581,29 @@ async function openTestDetail(id) {
             ? fmtDateTime(test.completed_at)
             : '<span style="color:var(--muted)">TBD</span>';
 
-        // ECD: date picker for operators on running tests; read-only otherwise
+        // ECD: editable only once, within 7 days of initial creation (enforced server-side).
         const ecdValue = test.ecd || '';
-        const ecdDisplay = isOp && isRunning
-            ? `<span class="ecd-picker-wrap">
-                   <input type="date" id="ecdInput" value="${esc(ecdValue)}"
-                          onchange="handleSaveECD()"
-                          style="font-size:13px;border:1.5px solid var(--border);border-radius:6px;padding:3px 7px;">
-               </span>`
-            : (ecdValue
+        const st = test.ecd_status || { state: 'uncreated', editable: true, days_remaining: null, message: null };
+        let ecdDisplay;
+        if (isOp && isRunning && st.editable) {
+            const hint = st.state === 'uncreated'
+                ? 'Editable once within 7 days after you set it'
+                : `Editable for ${st.days_remaining} more day${st.days_remaining === 1 ? '' : 's'} (one-time correction)`;
+            ecdDisplay = `<span class="ecd-picker-wrap">
+                   <input type="date" id="ecdInput" class="ecd-input" value="${esc(ecdValue)}" onchange="handleSaveECD()">
+                   <span class="ecd-hint">${hint}</span>
+               </span>`;
+        } else if (isOp && isRunning && !st.editable) {
+            // Locked for operators: show value + reason, no input rendered
+            ecdDisplay = `<span class="ecd-locked-wrap">
+                   <span class="meta-val">${ecdValue ? esc(ecdValue) : '<span style="color:var(--muted)">Not set</span>'}</span>
+                   <span class="ecd-lock-msg">&#128274; ${esc(st.message || 'The ECD can only be modified once within 7 days of its initial creation.')}</span>
+               </span>`;
+        } else {
+            ecdDisplay = ecdValue
                 ? `<span class="meta-val">${esc(ecdValue)}</span>`
-                : `<span style="color:var(--muted)">Not set</span>`);
+                : `<span style="color:var(--muted)">Not set</span>`;
+        }
 
         metaEl.innerHTML = `
             <div class="meta-grid">
@@ -659,9 +671,10 @@ async function openTestDetail(id) {
     const syncResultEl = document.getElementById('syncResult');
     if (syncResultEl) syncResultEl.style.display = 'none';
 
-    // Load sync timeline and pause history
+    // Load sync timeline, pause history and ECD change log
     loadSyncTimeline(id);
     loadPauseHistory(id);
+    loadEcdHistory(id);
 
     // Immediately render the live/frozen counter for running & paused slots
     if (test.status === 'running' || test.status === 'paused') tick();
@@ -764,12 +777,19 @@ async function handleSaveECD() {
     if (!input) return;
     const ecdDate = input.value.trim();
     try {
-        await api.setECD(currentDetailTest.id, ecdDate);
-        currentDetailTest.ecd = ecdDate;
-        showToast('ECD saved.', 'success');
+        const res = await api.setECD(currentDetailTest.id, ecdDate);
+        if (res.action === 'edit') {
+            showToast('ECD corrected — one-time edit used. The date is now locked.', 'success');
+        } else if (res.action === 'create') {
+            showToast('ECD set. You can correct it once within 7 days.', 'success');
+        } else {
+            showToast('ECD unchanged.', 'info');
+        }
     } catch(err) {
         showToast('Could not save ECD: ' + err.message, 'error');
     }
+    // Refresh detail so the lock state, remaining-days hint and audit trail update
+    await openTestDetail(currentDetailTest.id);
 }
 
 // ==================== Per-Slot Pause ====================
@@ -931,6 +951,37 @@ async function loadPauseHistory(id) {
         }).join('');
     } catch (err) {
         list.innerHTML = '<p class="empty-state error">Could not load pause history.</p>';
+    }
+}
+
+/** Load and render the ECD create/edit audit trail for a slot. */
+async function loadEcdHistory(id) {
+    const list = document.getElementById('ecdHistoryList');
+    if (!list) return;
+    try {
+        const res  = await api.getEcdLogs(id);
+        const logs = res.logs || [];
+        if (logs.length === 0) { list.innerHTML = '<p class="empty-state">No ECD set yet.</p>'; return; }
+        list.innerHTML = logs.map((l, i) => {
+            const isCreate = l.action === 'create';
+            const label = isCreate ? 'Initial ECD created' : 'ECD corrected (one-time edit)';
+            const change = isCreate
+                ? `Set to <strong>${esc(l.new_ecd)}</strong>`
+                : `<strong>${esc(l.old_ecd || '—')}</strong> &rarr; <strong>${esc(l.new_ecd)}</strong>`;
+            return `
+            <div class="timeline-item">
+                <div class="timeline-dot ${i === 0 ? 'latest' : ''}"></div>
+                <div class="timeline-content">
+                    <div class="timeline-time">${fmtDateTime(l.changed_at)}
+                        <span class="ecd-action-tag ${isCreate ? 'create' : 'edit'}">${isCreate ? 'CREATE' : 'EDIT'}</span></div>
+                    <div class="timeline-machine">${label}</div>
+                    <div class="timeline-reason">${change}</div>
+                    ${l.operator_name ? `<div class="timeline-est">By: ${esc(l.operator_name)}</div>` : ''}
+                </div>
+            </div>`;
+        }).join('');
+    } catch (err) {
+        list.innerHTML = '<p class="empty-state error">Could not load ECD history.</p>';
     }
 }
 

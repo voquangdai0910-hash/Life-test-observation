@@ -556,6 +556,33 @@ body {
 .timeline-reason strong { color: var(--text); }
 
 /* ═══════════════════════════════
+   ECD EDIT RESTRICTION
+═══════════════════════════════ */
+.ecd-picker-wrap { display: inline-flex; flex-direction: column; gap: 3px; }
+.ecd-input {
+    font-size: 13px; border: 1.5px solid var(--border);
+    border-radius: 6px; padding: 3px 7px;
+    background: var(--surface); color: var(--text);
+}
+.ecd-input:focus { outline: none; border-color: var(--primary); }
+.ecd-hint { font-size: 11px; font-weight: 600; color: #15803d; }
+
+.ecd-locked-wrap { display: inline-flex; flex-direction: column; gap: 3px; }
+.ecd-lock-msg {
+    font-size: 11px; font-weight: 600; color: #92400e;
+    background: var(--warning-lt); border-radius: 6px;
+    padding: 3px 7px; max-width: 240px; line-height: 1.4;
+}
+
+.ecd-action-tag {
+    display: inline-block; margin-left: 6px; vertical-align: middle;
+    font-size: 10px; font-weight: 800; letter-spacing: .5px;
+    padding: 1px 7px; border-radius: 99px; color: #fff;
+}
+.ecd-action-tag.create { background: var(--primary); }
+.ecd-action-tag.edit   { background: var(--warning); }
+
+/* ═══════════════════════════════
    EMPTY STATE
 ═══════════════════════════════ */
 .empty-state {

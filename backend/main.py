@@ -3,6 +3,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from datetime import datetime, timedelta
 import json
+import math
 import os
 import re
 import logging
@@ -503,6 +504,49 @@ def _test_effective_now(test: dict, system_state: dict) -> datetime:
     return min(candidates)
 
 
+ECD_EDIT_WINDOW_DAYS = 7
+ECD_LOCK_MESSAGE = ("The ECD can only be modified once within 7 days "
+                    "of its initial creation.")
+
+
+def _compute_ecd_status(test: dict) -> dict:
+    """Derive the ECD edit state for the UI (and as an authoritative hint).
+
+    States:
+      * uncreated     — no ECD yet; the initial creation is allowed.
+      * editable      — ECD set, not yet edited, still within the 7-day window;
+                        one correction remains. `days_remaining` is populated.
+      * locked_edited — the one-time edit has already been used.
+      * locked_expired— 7 days elapsed with no edit.
+    """
+    created_at = test.get("ecd_created_at")
+    edited = bool(test.get("ecd_edited"))
+
+    if not created_at:
+        return {"state": "uncreated", "editable": True,
+                "days_remaining": None, "message": None}
+
+    try:
+        created_dt = datetime.fromisoformat(created_at.rstrip('Z'))
+    except Exception:
+        return {"state": "uncreated", "editable": True,
+                "days_remaining": None, "message": None}
+
+    window_end = created_dt + timedelta(days=ECD_EDIT_WINDOW_DAYS)
+    now = datetime.utcnow()
+
+    if edited:
+        return {"state": "locked_edited", "editable": False,
+                "days_remaining": 0, "message": ECD_LOCK_MESSAGE}
+    if now > window_end:
+        return {"state": "locked_expired", "editable": False,
+                "days_remaining": 0, "message": ECD_LOCK_MESSAGE}
+
+    days_remaining = max(1, int(math.ceil((window_end - now).total_seconds() / 86400.0)))
+    return {"state": "editable", "editable": True,
+            "days_remaining": days_remaining, "message": None}
+
+
 @app.post("/api/life-tests")
 async def create_life_test(
     payload: LifeTestCreate,
@@ -598,6 +642,7 @@ async def get_life_test(
     test["is_paused"] = test["status"] == "paused"
     test["system_is_paused"] = system_state["is_paused"]
     test["system_paused_at"] = system_state["paused_at"]
+    test["ecd_status"] = _compute_ecd_status(test)
     return test
 
 
@@ -724,14 +769,39 @@ async def set_ecd(
     payload: ECDInput,
     current_user: TokenData = Depends(get_current_operator)
 ):
-    """Set or update the Estimated Completion Date (operator only)"""
+    """Set or update the Estimated Completion Date (operator only).
+
+    The one-time / 7-day edit restriction is enforced here in the database
+    layer, so it cannot be bypassed via direct API calls.
+    """
     test = db.get_life_test(lt_id)
     if not test:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Life test not found")
-    result = db.set_ecd(lt_id, payload.ecd_date)
+    user = db.get_user_by_id(current_user.user_id)
+    operator_name = user["full_name"] if user else current_user.user_id
+    result = db.set_ecd(lt_id, payload.ecd_date, current_user.user_id, operator_name)
     if not result["success"]:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=result["error"])
-    return {"message": "ECD updated", "ecd": payload.ecd_date}
+    # Recompute the fresh lock state so the client can update its UI immediately
+    ecd_status = _compute_ecd_status(db.get_life_test(lt_id))
+    return {
+        "message": "ECD updated",
+        "ecd": result["ecd"],
+        "action": result.get("action"),
+        "ecd_status": ecd_status
+    }
+
+
+@app.get("/api/life-tests/{lt_id}/ecd-logs")
+async def get_ecd_logs(
+    lt_id: str,
+    current_user: TokenData = Depends(get_current_user)
+):
+    """Get the ECD change audit trail for a life test (any authenticated user)."""
+    test = db.get_life_test(lt_id)
+    if not test:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Life test not found")
+    return {"logs": db.get_ecd_audit_logs(lt_id), "ecd_status": _compute_ecd_status(test)}
 
 
 @app.delete("/api/life-tests/{lt_id}")
