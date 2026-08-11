@@ -152,6 +152,7 @@ class LifeTestCreate(BaseModel):
     """Create a new life test"""
     test_label: str                        # e.g. LT001
     product: str                           # product name / model
+    datecode: str                          # manufacturing date code of the unit
     on_minutes: float = 8.0               # ON duration per cycle
     off_minutes: float = 2.0              # OFF duration per cycle
     target_hours: int = 468               # target ON hours

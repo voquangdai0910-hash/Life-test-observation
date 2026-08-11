@@ -473,6 +473,43 @@ body {
 .data-table tbody tr:hover td { background: var(--primary-lt); }
 
 /* ═══════════════════════════════
+   TESTING SUMMARY TABLE
+═══════════════════════════════ */
+.summary-block { margin-top: 34px; }
+.summary-header { align-items: center; }
+.summary-search { min-width: 260px; }
+
+.summary-table th.sortable { cursor: pointer; user-select: none; white-space: nowrap; }
+.summary-table th.sortable:hover { color: var(--text-2); }
+.summary-table th .sort-caret { display: inline-block; width: 12px; margin-left: 4px; opacity: .55; font-size: 10px; }
+.summary-table th.sort-asc  .sort-caret::after { content: '\25B2'; }
+.summary-table th.sort-desc .sort-caret::after { content: '\25BC'; }
+
+.summary-table td.col-status { white-space: nowrap; }
+.summary-table td.col-product { font-weight: 600; color: var(--text); }
+.summary-table td.col-datecode .datecode-id { font-family: 'Segoe UI', system-ui, sans-serif; font-weight: 600; color: var(--text-2); }
+.summary-table td.col-date { white-space: nowrap; }
+.summary-table td.col-date .date-muted { color: var(--muted); }
+
+.dur-primary { font-weight: 700; color: var(--text); }
+.dur-sub { display: block; font-size: 12px; color: var(--muted); margin-top: 2px; }
+
+.summary-footer {
+    display: flex; align-items: center; justify-content: space-between;
+    margin-top: 14px; flex-wrap: wrap; gap: 10px;
+}
+.summary-count { font-size: 13px; color: var(--muted); }
+.summary-pagination { display: flex; gap: 6px; align-items: center; }
+.summary-pagination button {
+    min-width: 34px; padding: 6px 10px; border: 1.5px solid var(--border);
+    background: var(--surface); border-radius: 8px; font-size: 13px;
+    cursor: pointer; color: var(--text-2);
+}
+.summary-pagination button:hover:not(:disabled) { border-color: var(--primary); color: var(--primary); }
+.summary-pagination button.active { background: var(--primary); border-color: var(--primary); color: #fff; }
+.summary-pagination button:disabled { opacity: .45; cursor: default; }
+
+/* ═══════════════════════════════
    TOAST
 ═══════════════════════════════ */
 .toast {

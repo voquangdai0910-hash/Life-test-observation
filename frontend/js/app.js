@@ -13,6 +13,16 @@ let systemState = {
     total_paused_minutes_ever: 0
 };
 
+/** Testing Summary table state — data cache, search, sort and pagination */
+let summaryState = {
+    rows: [],          // normalized row objects for all tests (ongoing + completed)
+    search: '',
+    sortKey: null,     // 'status' | 'start' | 'end' | 'duration' — null = default grouped order
+    sortDir: 'asc',
+    page: 1,
+    pageSize: 10
+};
+
 /** Normalise an ISO datetime string to always be parsed as UTC */
 function toUtcMs(iso) {
     if (!iso) return 0;
@@ -325,6 +335,7 @@ function showSection(name, navEl) {
     if (navEl) navEl.classList.add('active');
 
     if (name === 'dashboard') loadLifeTests();
+    if (name === 'summary')   loadSummaryTable();
     if (name === 'reports')   loadReports();
     if (name === 'settings')  loadSettings();
 }
@@ -469,6 +480,216 @@ async function loadLifeTests() {
     }
 }
 
+// ==================== Testing Summary Table ====================
+
+const MS_PER_DAY = 86400000;
+
+/** Reduce an ISO datetime (UTC) or a plain YYYY-MM-DD date to local-midnight ms. */
+function dayStartMs(value) {
+    if (!value) return null;
+    let d;
+    if (/^\d{4}-\d{2}-\d{2}$/.test(value)) {
+        // Plain date (e.g. ECD) — construct at local midnight, no TZ shift
+        const [y, m, day] = value.split('-').map(Number);
+        d = new Date(y, m - 1, day);
+    } else {
+        // Full datetime stored as UTC — normalize then drop the time component
+        const ms = toUtcMs(value);
+        if (!ms) return null;
+        const t = new Date(ms);
+        d = new Date(t.getFullYear(), t.getMonth(), t.getDate());
+    }
+    return d.getTime();
+}
+
+/** Whole-day difference between two day-start timestamps (end - start), or null. */
+function diffDays(startMs, endMs) {
+    if (startMs == null || endMs == null) return null;
+    return Math.max(0, Math.round((endMs - startMs) / MS_PER_DAY));
+}
+
+/** Format a YYYY-MM-DD from a day-start ms value. */
+function fmtDateShort(ms) {
+    if (ms == null) return null;
+    const d = new Date(ms);
+    const p = n => String(n).padStart(2, '0');
+    return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`;
+}
+
+function daysLabel(n) {
+    return n == null ? '—' : `${n} day${n === 1 ? '' : 's'}`;
+}
+
+/** Fetch every life test and build normalized rows for the summary table. */
+async function loadSummaryTable() {
+    const body = document.getElementById('summaryTableBody');
+    if (!body) return;
+    try {
+        const res = await api.getLifeTests('');   // no filter → all statuses
+        const tests = res.life_tests || [];
+        summaryState.rows = tests.map(t => {
+            const startMs = dayStartMs(t.created_at);
+            const isCompleted = t.status === 'completed';
+            // End: completed → actual completion date; otherwise → ECD (expected)
+            const endMs = isCompleted ? dayStartMs(t.completed_at) : dayStartMs(t.ecd);
+            const totalDays = diffDays(startMs, endMs);
+            const elapsedDays = diffDays(startMs, dayStartMs(new Date().toISOString()));
+            return {
+                id: t.id,
+                status: t.status,
+                product: t.product || '',
+                datecode: t.datecode || '',
+                startMs,
+                endMs,
+                endIsExpected: !isCompleted,
+                totalDays,
+                elapsedDays,
+                isCompleted
+            };
+        });
+        summaryState.page = 1;
+        renderSummaryTable();
+    } catch (err) {
+        body.innerHTML = `<tr><td colspan="6" class="empty-state error">${esc(err.message)}</td></tr>`;
+    }
+}
+
+/** Apply search + sort, then render the current page of the summary table. */
+function renderSummaryTable() {
+    const body = document.getElementById('summaryTableBody');
+    if (!body) return;
+
+    // 1) Filter by search (product or model)
+    const q = summaryState.search.trim().toLowerCase();
+    let rows = summaryState.rows.filter(r =>
+        !q || r.product.toLowerCase().includes(q) || r.datecode.toLowerCase().includes(q));
+
+    // 2) Sort
+    const key = summaryState.sortKey;
+    if (key) {
+        const dir = summaryState.sortDir === 'asc' ? 1 : -1;
+        const val = (r) => {
+            switch (key) {
+                case 'status':   return r.status;
+                case 'start':    return r.startMs ?? 0;
+                case 'end':      return r.endMs ?? 0;
+                case 'duration': return r.totalDays ?? -1;
+            }
+        };
+        rows = rows.slice().sort((a, b) => {
+            const va = val(a), vb = val(b);
+            if (va < vb) return -1 * dir;
+            if (va > vb) return 1 * dir;
+            return 0;
+        });
+    } else {
+        // Default grouped order: Ongoing (oldest start first), then Completed
+        // (most recent completion first). 'paused' counts as ongoing/live.
+        const ongoing = rows.filter(r => !r.isCompleted)
+            .sort((a, b) => (a.startMs ?? 0) - (b.startMs ?? 0));
+        const completed = rows.filter(r => r.isCompleted)
+            .sort((a, b) => (b.endMs ?? 0) - (a.endMs ?? 0));
+        rows = ongoing.concat(completed);
+    }
+
+    // 3) Update sort caret indicators on headers
+    document.querySelectorAll('.summary-table th.sortable').forEach(th => {
+        th.classList.remove('sort-asc', 'sort-desc');
+        if (th.dataset.key === key) th.classList.add(summaryState.sortDir === 'asc' ? 'sort-asc' : 'sort-desc');
+    });
+
+    const total = rows.length;
+    if (total === 0) {
+        body.innerHTML = `<tr><td colspan="6" class="empty-state">${q ? 'No machines match your search.' : 'No testing records yet.'}</td></tr>`;
+        document.getElementById('summaryCount').textContent = '';
+        document.getElementById('summaryPagination').innerHTML = '';
+        return;
+    }
+
+    // 4) Paginate
+    const pageSize = summaryState.pageSize;
+    const pageCount = Math.ceil(total / pageSize);
+    if (summaryState.page > pageCount) summaryState.page = pageCount;
+    const start = (summaryState.page - 1) * pageSize;
+    const pageRows = rows.slice(start, start + pageSize);
+
+    body.innerHTML = pageRows.map(renderSummaryRow).join('');
+
+    // 5) Footer: count + pagination controls
+    const from = start + 1, to = start + pageRows.length;
+    document.getElementById('summaryCount').textContent = `Showing ${from}–${to} of ${total} machine${total === 1 ? '' : 's'}`;
+    renderSummaryPagination(pageCount);
+}
+
+function renderSummaryRow(r) {
+    const startStr = fmtDateShort(r.startMs) || '<span class="date-muted">—</span>';
+    let endStr;
+    if (r.endMs != null) {
+        endStr = fmtDateShort(r.endMs) + (r.endIsExpected ? ' <span class="date-muted">(exp.)</span>' : '');
+    } else {
+        endStr = '<span class="date-muted">' + (r.endIsExpected ? 'ECD not set' : '—') + '</span>';
+    }
+
+    // Duration cell: ongoing → planned + elapsed; completed → actual total
+    let durHtml;
+    if (r.isCompleted) {
+        durHtml = `<span class="dur-primary">${daysLabel(r.totalDays)}</span>`;
+    } else {
+        const planned = r.totalDays != null
+            ? `<span class="dur-primary">${daysLabel(r.totalDays)} planned</span>`
+            : `<span class="dur-primary">—</span>`;
+        durHtml = `${planned}<span class="dur-sub">${daysLabel(r.elapsedDays)} elapsed</span>`;
+    }
+
+    return `
+    <tr onclick="openTestDetail('${esc(r.id)}')" style="cursor:pointer;">
+        <td class="col-status"><span class="status-badge status-${esc(r.status)}">${esc(statusLabel(r.status))}</span></td>
+        <td class="col-product">${esc(r.product) || '<span class="date-muted">—</span>'}</td>
+        <td class="col-datecode"><span class="datecode-id">${r.datecode ? esc(r.datecode) : '<span class="date-muted">—</span>'}</span></td>
+        <td class="col-date">${startStr}</td>
+        <td class="col-date">${endStr}</td>
+        <td class="col-duration">${durHtml}</td>
+    </tr>`;
+}
+
+function renderSummaryPagination(pageCount) {
+    const wrap = document.getElementById('summaryPagination');
+    if (!wrap) return;
+    if (pageCount <= 1) { wrap.innerHTML = ''; return; }
+    const cur = summaryState.page;
+    let html = `<button ${cur === 1 ? 'disabled' : ''} onclick="summaryGoPage(${cur - 1})">‹</button>`;
+    for (let p = 1; p <= pageCount; p++) {
+        html += `<button class="${p === cur ? 'active' : ''}" onclick="summaryGoPage(${p})">${p}</button>`;
+    }
+    html += `<button ${cur === pageCount ? 'disabled' : ''} onclick="summaryGoPage(${cur + 1})">›</button>`;
+    wrap.innerHTML = html;
+}
+
+function summaryGoPage(p) {
+    summaryState.page = p;
+    renderSummaryTable();
+}
+
+function onSummarySearch() {
+    summaryState.search = document.getElementById('summarySearch').value || '';
+    summaryState.page = 1;
+    renderSummaryTable();
+}
+
+/** Toggle sort on a column; clicking the active column flips direction. */
+function summarySort(key) {
+    if (summaryState.sortKey === key) {
+        summaryState.sortDir = summaryState.sortDir === 'asc' ? 'desc' : 'asc';
+    } else {
+        summaryState.sortKey = key;
+        // Sensible defaults: dates/duration newest-or-largest first feels natural,
+        // status ascending groups the statuses.
+        summaryState.sortDir = (key === 'status') ? 'asc' : 'desc';
+    }
+    summaryState.page = 1;
+    renderSummaryTable();
+}
+
 function renderTestCard(test) {
     const ls = test.last_sync;
     const syncedAt = ls ? (ls.syncedAt || ls.synced_at) : null;
@@ -608,6 +829,7 @@ async function openTestDetail(id) {
         metaEl.innerHTML = `
             <div class="meta-grid">
                 <div><span class="meta-label">Product</span><span class="meta-val">${esc(test.product)}</span></div>
+                <div><span class="meta-label">Datecode</span><span class="meta-val">${test.datecode ? esc(test.datecode) : '<span style="color:var(--muted)">--</span>'}</span></div>
                 <div><span class="meta-label">Operator</span><span class="meta-val">${esc(test.operator_name) || '--'}</span></div>
                 <div><span class="meta-label">Cycle</span><span class="meta-val">${test.on_minutes}m ON / ${test.off_minutes}m OFF</span></div>
                 <div><span class="meta-label">Duty</span><span class="meta-val">${duty}%</span></div>
@@ -1018,6 +1240,7 @@ async function handleCreateTest(e) {
     const payload = {
         test_label:             document.getElementById('ntLabel').value.trim(),
         product:                document.getElementById('ntProduct').value.trim(),
+        datecode:               document.getElementById('ntDatecode').value.trim(),
         on_minutes:             onMin,
         off_minutes:            offMin,
         target_hours:           parseInt(document.getElementById('ntTarget').value, 10),

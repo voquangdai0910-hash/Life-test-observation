@@ -4,7 +4,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Life Test Observation</title>
-    <link rel="stylesheet" href="css/style.css?v=312">
+    <link rel="stylesheet" href="css/style.css?v=316">
 </head>
 <body>
 <div id="app">
@@ -84,6 +84,7 @@
                 <nav>
                     <a class="nav-item" id="navNewTest" onclick="showSection('newTest', this)" style="display:none;"><span class="nav-icon">&#10133;</span> New Life Test</a>
                     <a class="nav-item active" id="navDashboard" onclick="showSection('dashboard', this)"><span class="nav-icon">&#128202;</span> Dashboard</a>
+                    <a class="nav-item" id="navSummary" onclick="showSection('summary', this)"><span class="nav-icon">&#128203;</span> Testing Summary</a>
                     <a class="nav-item" id="navReports" onclick="showSection('reports', this)" style="display:none;"><span class="nav-icon">&#128203;</span> Sync Reports</a>
                     <a class="nav-item" id="navSettings" onclick="showSection('settings', this)" style="display:none;"><span class="nav-icon">&#9881;</span> Settings</a>
                 </nav>
@@ -111,6 +112,36 @@
                     </div>
                     <div id="testsGrid" class="tests-grid">
                         <p class="empty-state">Loading tests...</p>
+                    </div>
+                </section>
+
+                <!-- ==================== TESTING SUMMARY ==================== -->
+                <section id="summarySection" class="section">
+                    <div class="section-header summary-header">
+                        <h2>Testing Summary</h2>
+                        <input type="search" id="summarySearch" class="filter-select summary-search"
+                               placeholder="&#128269; Search product or datecode..." oninput="onSummarySearch()">
+                    </div>
+                    <div class="table-card">
+                        <table class="data-table summary-table">
+                            <thead>
+                                <tr>
+                                    <th class="sortable" data-key="status" onclick="summarySort('status')">Status<span class="sort-caret"></span></th>
+                                    <th>Product</th>
+                                    <th>Datecode</th>
+                                    <th class="sortable" data-key="start" onclick="summarySort('start')">Start Date<span class="sort-caret"></span></th>
+                                    <th class="sortable" data-key="end" onclick="summarySort('end')">End Date<span class="sort-caret"></span></th>
+                                    <th class="sortable" data-key="duration" onclick="summarySort('duration')">Total Test Duration<span class="sort-caret"></span></th>
+                                </tr>
+                            </thead>
+                            <tbody id="summaryTableBody">
+                                <tr><td colspan="6" class="empty-state">Loading summary...</td></tr>
+                            </tbody>
+                        </table>
+                    </div>
+                    <div class="summary-footer">
+                        <span class="summary-count" id="summaryCount"></span>
+                        <div class="summary-pagination" id="summaryPagination"></div>
                     </div>
                 </section>
 
@@ -256,6 +287,14 @@
 
                             <div class="form-row">
                                 <div class="form-group">
+                                    <label>Datecode *</label>
+                                    <input type="text" id="ntDatecode" required placeholder="e.g. 2625">
+                                    <small>Manufacturing date code of the unit</small>
+                                </div>
+                            </div>
+
+                            <div class="form-row">
+                                <div class="form-group">
                                     <label>Target ON Hours</label>
                                     <select id="ntTarget">
                                         <option value="468">468 hours</option>
@@ -388,8 +427,8 @@
 
 <div id="toast" class="toast" style="display:none;"></div>
 
-<script src="js/api.js?v=312"></script>
-<script src="js/app.js?v=312"></script>
+<script src="js/api.js?v=316"></script>
+<script src="js/app.js?v=316"></script>
 </body>
 </html>
 

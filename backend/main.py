@@ -556,6 +556,7 @@ async def create_life_test(
     result = db.create_life_test(
         test_label=payload.test_label,
         product=payload.product,
+        datecode=payload.datecode,
         operator_id=current_user.user_id,
         on_minutes=payload.on_minutes,
         off_minutes=payload.off_minutes,
@@ -987,5 +988,13 @@ async def get_pause_logs(
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True)
+    # Auto-reload restarts the worker on every .py change. During that restart the
+    # outgoing and incoming worker briefly share the same SQLite file, which can
+    # surface a transient "database is locked" on an in-flight write. Keep reload
+    # OFF by default so real lab usage is stable; a developer can opt back in by
+    # setting API_RELOAD=true in the environment / backend/.env.
+    host = os.getenv("API_HOST", "0.0.0.0")
+    port = int(os.getenv("API_PORT", "8000"))
+    reload_enabled = os.getenv("API_RELOAD", "false").strip().lower() in ("1", "true", "yes", "on")
+    uvicorn.run("main:app", host=host, port=port, reload=reload_enabled)
 

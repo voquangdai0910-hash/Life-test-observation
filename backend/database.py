@@ -17,10 +17,17 @@ class LocalDB:
         self.init_db()
 
     def get_connection(self):
-        """Get a SQLite database connection with row-as-dict support"""
-        conn = sqlite3.connect(self.db_path)
+        """Get a SQLite database connection with row-as-dict support.
+
+        A generous busy timeout lets a write wait for a transient lock (e.g.
+        two overlapping writes, or a dev-server auto-reload where the old and
+        new worker briefly coexist) instead of failing immediately with
+        "database is locked".
+        """
+        conn = sqlite3.connect(self.db_path, timeout=15.0)
         conn.row_factory = sqlite3.Row
         conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA busy_timeout=15000")
         conn.execute("PRAGMA foreign_keys=ON")
         return conn
 
@@ -78,6 +85,7 @@ class LocalDB:
                 id TEXT PRIMARY KEY,
                 test_label TEXT UNIQUE NOT NULL,
                 product TEXT NOT NULL,
+                datecode TEXT,
                 operator_id TEXT NOT NULL REFERENCES users(id),
                 on_minutes REAL DEFAULT 8.0,
                 off_minutes REAL DEFAULT 2.0,
@@ -163,7 +171,7 @@ class LocalDB:
         # Migrate existing databases: add new columns if absent
         conn2 = self.get_connection()
         for col in ('completed_at', 'ecd', 'paused_at',
-                    'ecd_original', 'ecd_created_at', 'ecd_created_by'):
+                    'ecd_original', 'ecd_created_at', 'ecd_created_by', 'datecode'):
             try:
                 conn2.execute(f"ALTER TABLE life_tests ADD COLUMN {col} TEXT")
                 conn2.commit()
@@ -606,17 +614,19 @@ class LocalDB:
 
     def create_life_test(self, test_label: str, product: str, operator_id: str,
                          on_minutes: float, off_minutes: float, target_hours: int,
-                         initial_machine_hours: float, notes: str = None) -> dict:
+                         initial_machine_hours: float, notes: str = None,
+                         datecode: str = None) -> dict:
         """Create a new life test with its first sync (initial machine reading)"""
+        conn = None
         try:
             lt_id = str(uuid.uuid4())
             sync_id = str(uuid.uuid4())
             now = datetime.utcnow().isoformat() + 'Z'
             conn = self.get_connection()
             conn.execute(
-                "INSERT INTO life_tests (id, test_label, product, operator_id, on_minutes, off_minutes, "
-                "target_hours, status, notes, created_at, updated_at) VALUES (?,?,?,?,?,?,?,'running',?,?,?)",
-                (lt_id, test_label, product, operator_id, on_minutes, off_minutes, target_hours, notes, now, now)
+                "INSERT INTO life_tests (id, test_label, product, datecode, operator_id, on_minutes, off_minutes, "
+                "target_hours, status, notes, created_at, updated_at) VALUES (?,?,?,?,?,?,?,?,'running',?,?,?)",
+                (lt_id, test_label, product, datecode, operator_id, on_minutes, off_minutes, target_hours, notes, now, now)
             )
             conn.execute(
                 "INSERT INTO sync_records (id, life_test_id, machine_hours, estimated_hours, "
@@ -624,12 +634,14 @@ class LocalDB:
                 (sync_id, lt_id, initial_machine_hours, initial_machine_hours, now, operator_id, "Initial reading")
             )
             conn.commit()
-            conn.close()
             return {"success": True, "id": lt_id, "test_label": test_label}
         except sqlite3.IntegrityError:
             return {"success": False, "error": f"Test ID '{test_label}' already exists"}
         except Exception as e:
             return {"success": False, "error": str(e)}
+        finally:
+            if conn is not None:
+                conn.close()
 
     def _attach_last_sync(self, conn, test: dict) -> dict:
         """Helper: attach last sync record to a test dict"""
@@ -688,6 +700,7 @@ class LocalDB:
                         estimated_hours: float, difference_minutes: float,
                         operator_id: str, notes: str = None) -> dict:
         """Record an operator sync"""
+        conn = None
         try:
             sync_id = str(uuid.uuid4())
             now = datetime.utcnow().isoformat() + 'Z'
@@ -699,10 +712,12 @@ class LocalDB:
             )
             conn.execute("UPDATE life_tests SET updated_at = ? WHERE id = ?", (now, life_test_id))
             conn.commit()
-            conn.close()
             return {"success": True, "id": sync_id, "synced_at": now}
         except Exception as e:
             return {"success": False, "error": str(e)}
+        finally:
+            if conn is not None:
+                conn.close()
 
     def get_sync_records(self, life_test_id: str) -> List[dict]:
         """Get all sync records for a life test (oldest first)"""
@@ -722,6 +737,7 @@ class LocalDB:
 
     def complete_life_test(self, lt_id: str) -> dict:
         """Mark a life test as completed and record the completion timestamp"""
+        conn = None
         try:
             now = datetime.utcnow().isoformat() + 'Z'
             conn = self.get_connection()
@@ -730,10 +746,12 @@ class LocalDB:
                 (now, now, lt_id)
             )
             conn.commit()
-            conn.close()
             return {"success": True}
         except Exception as e:
             return {"success": False, "error": str(e)}
+        finally:
+            if conn is not None:
+                conn.close()
 
     # Number of days the initial ECD stays editable (one correction only).
     ECD_EDIT_WINDOW_DAYS = 7
