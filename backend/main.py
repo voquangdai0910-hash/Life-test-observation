@@ -16,8 +16,12 @@ from models import (
     DataUploadWithOnHours, TestingSessionWithOnHours,
     LifeTestCreate, SyncInput, ECDInput,
     SystemPauseRequest, SystemStateResponse,
-    LifeTestPauseRequest, LifeTestResumeRequest
+    LifeTestPauseRequest, LifeTestResumeRequest,
+    AdminUserCreate, RoleUpdate, ChangePassword
 )
+
+# Minimum length for a new password (applies to change-password and admin-created accounts)
+MIN_PASSWORD_LEN = 8
 from database import db
 from auth import (
     get_current_user, get_current_operator, get_current_access_person,
@@ -72,55 +76,97 @@ async def options_handler(full_path: str):
     """Handle OPTIONS preflight requests"""
     return {"status": "ok"}
 
-@app.post("/api/auth/register", response_model=TokenResponse)
+@app.post("/api/auth/register")
 async def register(user: UserRegister):
-    """Register a new user.
-
-    Self-registration always creates a plain 'operator'. Elevated roles
-    (access_person, admin) must be granted out-of-band by an administrator —
-    the role is never taken from the request body, to prevent privilege
-    escalation.
-    """
-    logger.debug(f"Register attempt: {user.email}")
-    ASSIGNED_ROLE = "operator"
-    # Check if user already exists
-    existing_user = db.get_user_by_email(user.email)
-    if existing_user:
-        logger.warning("Registration rejected: email already registered")
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Email already registered"
-        )
-
-    result = db.create_user(user.email, user.full_name, user.password, ASSIGNED_ROLE)
-
-    if not result["success"]:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=result["error"]
-        )
-
-    auth_user = result["user"]
-
-    # Create token
-    token_data = {
-        "email": user.email,
-        "user_id": auth_user["id"],
-        "role": ASSIGNED_ROLE
-    }
-    access_token = create_access_token(token_data)
-
-    return TokenResponse(
-        access_token=access_token,
-        token_type="bearer",
-        user={
-            "id": auth_user["id"],
-            "email": user.email,
-            "full_name": user.full_name,
-            "role": ASSIGNED_ROLE,
-            "created_at": auth_user["created_at"]
-        }
+    """Self-registration is DISABLED. Accounts are created by an administrator
+    (see the admin User Management panel). This endpoint is kept only to return
+    a clear message to any client that still tries to self-register."""
+    logger.warning(f"Blocked self-registration attempt: {user.email}")
+    raise HTTPException(
+        status_code=status.HTTP_403_FORBIDDEN,
+        detail="Self-registration is disabled. Ask an administrator to create your account."
     )
+
+
+@app.post("/api/auth/change-password")
+async def change_password(
+    payload: ChangePassword,
+    current_user: TokenData = Depends(get_current_user)
+):
+    """Change your OWN password. Requires the current password."""
+    user = db.get_user_by_id(current_user.user_id)
+    if not user:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found")
+    is_valid, _ = verify_password(payload.current_password, user["password_hash"])
+    if not is_valid:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Current password is incorrect")
+    new_pw = payload.new_password or ""
+    if len(new_pw) < MIN_PASSWORD_LEN:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST,
+                            detail=f"New password must be at least {MIN_PASSWORD_LEN} characters.")
+    if new_pw == payload.current_password:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST,
+                            detail="New password must be different from the current one.")
+    if not db.update_password_hash(current_user.user_id, hash_password(new_pw)):
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Could not update password")
+    return {"message": "Password changed"}
+
+
+# ==================== Admin: User Management ====================
+
+@app.get("/api/admin/users")
+async def admin_list_users(current_user: TokenData = Depends(get_current_admin)):
+    """List all accounts (admin only)."""
+    return {"users": db.list_users()}
+
+
+@app.post("/api/admin/users")
+async def admin_create_user(
+    payload: AdminUserCreate,
+    current_user: TokenData = Depends(get_current_admin)
+):
+    """Create an account with an explicit role (admin only)."""
+    if len(payload.password or "") < MIN_PASSWORD_LEN:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST,
+                            detail=f"Password must be at least {MIN_PASSWORD_LEN} characters.")
+    if db.get_user_by_email(payload.email):
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Email already registered")
+    result = db.create_user(payload.email, payload.full_name, payload.password, payload.role.value)
+    if not result["success"]:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=result["error"])
+    return {"message": "User created", "user": result["user"]}
+
+
+@app.patch("/api/admin/users/{user_id}/role")
+async def admin_set_user_role(
+    user_id: str,
+    payload: RoleUpdate,
+    current_user: TokenData = Depends(get_current_admin)
+):
+    """Change an account's role (admin only). Cannot demote the last admin."""
+    if user_id == current_user.user_id and payload.role.value != "admin":
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST,
+                            detail="You cannot change your own admin role.")
+    result = db.set_user_role(user_id, payload.role.value)
+    if not result["success"]:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=result["error"])
+    return {"message": "Role updated", **result}
+
+
+@app.delete("/api/admin/users/{user_id}")
+async def admin_delete_user(
+    user_id: str,
+    current_user: TokenData = Depends(get_current_admin)
+):
+    """Delete an account (admin only). Cannot delete yourself, the last admin,
+    or an account that still owns life tests / uploads."""
+    if user_id == current_user.user_id:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST,
+                            detail="You cannot delete your own account.")
+    result = db.delete_user(user_id)
+    if not result["success"]:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=result["error"])
+    return {"message": "User deleted"}
 
 @app.post("/api/auth/login", response_model=TokenResponse)
 async def login(credentials: UserLogin):

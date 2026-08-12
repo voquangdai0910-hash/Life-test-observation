@@ -36,7 +36,9 @@ class LabDataAPI {
                     localStorage.removeItem('user');
                     window.location.reload();
                 }
-                const err = await res.json();
+                // Error body may not be JSON (proxy 502/504 HTML, empty body) —
+                // don't let JSON.parse mask the real status code.
+                const err = await res.json().catch(() => ({}));
                 throw new Error(err.detail || `HTTP ${res.status}`);
             }
             return await res.json();
@@ -54,6 +56,9 @@ class LabDataAPI {
         return this.request('POST', '/auth/login', { email, password }, false);
     }
     verifyToken() { return this.request('GET', '/auth/verify'); }
+    changePassword(current, next) {
+        return this.request('POST', '/auth/change-password', { current_password: current, new_password: next });
+    }
 
     // ── Life Tests ──
     createLifeTest(payload) { return this.request('POST', '/life-tests', payload); }
@@ -93,6 +98,12 @@ class LabDataAPI {
     // ── Config (legacy) ──
     getUploadInterval() { return this.request('GET', '/config/upload-interval'); }
     setUploadInterval(m) { return this.request('POST', '/config/upload-interval', { interval_minutes: m }); }
+
+    // ── Admin: User Management ──
+    listUsers() { return this.request('GET', '/admin/users'); }
+    createUser(payload) { return this.request('POST', '/admin/users', payload); }
+    setUserRole(id, role) { return this.request('PATCH', `/admin/users/${id}/role`, { role }); }
+    deleteUser(id) { return this.request('DELETE', `/admin/users/${id}`); }
 }
 
 const api = new LabDataAPI();

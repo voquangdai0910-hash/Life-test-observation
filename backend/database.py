@@ -294,6 +294,7 @@ class LocalDB:
 
     def update_password_hash(self, user_id: str, password_hash: str) -> bool:
         """Update a user's stored password hash (used to upgrade legacy hashes)"""
+        conn = None
         try:
             now = datetime.utcnow().isoformat() + 'Z'
             conn = self.get_connection()
@@ -307,6 +308,96 @@ class LocalDB:
         except Exception as e:
             print(f"Error updating password hash: {e}")
             return False
+        finally:
+            if conn is not None:
+                conn.close()
+
+    # ── Admin user management ──
+
+    def list_users(self) -> List[dict]:
+        """Return all users (without password hashes), newest first."""
+        conn = None
+        try:
+            conn = self.get_connection()
+            rows = conn.execute(
+                "SELECT id, email, full_name, role, created_at FROM users "
+                "ORDER BY created_at DESC"
+            ).fetchall()
+            return [dict(r) for r in rows]
+        except Exception as e:
+            print(f"Error listing users: {e}")
+            return []
+        finally:
+            if conn is not None:
+                conn.close()
+
+    def count_admins(self) -> int:
+        """Number of admin accounts (used to prevent removing the last admin)."""
+        conn = None
+        try:
+            conn = self.get_connection()
+            return conn.execute(
+                "SELECT COUNT(*) FROM users WHERE role = 'admin'"
+            ).fetchone()[0]
+        except Exception as e:
+            print(f"Error counting admins: {e}")
+            return 0
+        finally:
+            if conn is not None:
+                conn.close()
+
+    def set_user_role(self, user_id: str, role: str) -> dict:
+        """Change a user's role. Refuses to demote the last remaining admin."""
+        conn = None
+        try:
+            conn = self.get_connection()
+            row = conn.execute("SELECT role FROM users WHERE id = ?", (user_id,)).fetchone()
+            if not row:
+                return {"success": False, "error": "User not found"}
+            if row["role"] == "admin" and role != "admin" and self.count_admins() <= 1:
+                return {"success": False, "error": "Cannot demote the last remaining admin."}
+            now = datetime.utcnow().isoformat() + 'Z'
+            conn.execute(
+                "UPDATE users SET role = ?, updated_at = ? WHERE id = ?",
+                (role, now, user_id)
+            )
+            conn.commit()
+            return {"success": True, "id": user_id, "role": role}
+        except Exception as e:
+            return {"success": False, "error": str(e)}
+        finally:
+            if conn is not None:
+                conn.close()
+
+    def delete_user(self, user_id: str) -> dict:
+        """Delete a user. Refuses if the user owns records (FK) or is the last admin."""
+        conn = None
+        try:
+            conn = self.get_connection()
+            row = conn.execute("SELECT role FROM users WHERE id = ?", (user_id,)).fetchone()
+            if not row:
+                return {"success": False, "error": "User not found"}
+            if row["role"] == "admin" and self.count_admins() <= 1:
+                return {"success": False, "error": "Cannot delete the last remaining admin."}
+            # Block deletion when the user still owns data, to avoid orphaning it.
+            owns = conn.execute(
+                "SELECT ("
+                "  (SELECT COUNT(*) FROM life_tests WHERE operator_id = ?) + "
+                "  (SELECT COUNT(*) FROM data_uploads WHERE operator_id = ?)"
+                ")", (user_id, user_id)
+            ).fetchone()[0]
+            if owns:
+                return {"success": False,
+                        "error": "This account owns life tests / uploads and cannot be deleted. "
+                                 "Change its role to Observer instead."}
+            conn.execute("DELETE FROM users WHERE id = ?", (user_id,))
+            conn.commit()
+            return {"success": True}
+        except Exception as e:
+            return {"success": False, "error": str(e)}
+        finally:
+            if conn is not None:
+                conn.close()
 
     # ==================== Data Upload Methods ====================
 
@@ -802,13 +893,32 @@ class LocalDB:
             return []
 
     def complete_life_test(self, lt_id: str) -> dict:
-        """Mark a life test as completed and record the completion timestamp"""
+        """Mark a life test as completed and record the completion timestamp.
+
+        If the test is completed while still paused, close its open pause log so
+        its accumulated paused time stops growing forever (an open pause row is
+        otherwise treated as still in-progress by the paused-time calculations).
+        """
         conn = None
         try:
             now = datetime.utcnow().isoformat() + 'Z'
+            now_dt = datetime.fromisoformat(now.rstrip('Z'))
             conn = self.get_connection()
+            open_pause = conn.execute(
+                "SELECT id, pause_time FROM life_test_pause_logs "
+                "WHERE life_test_id = ? AND resume_time IS NULL ORDER BY pause_time DESC LIMIT 1",
+                (lt_id,)
+            ).fetchone()
+            if open_pause:
+                start = datetime.fromisoformat(open_pause["pause_time"].rstrip('Z'))
+                mins = max(0.0, (now_dt - start).total_seconds() / 60.0)
+                conn.execute(
+                    "UPDATE life_test_pause_logs SET resume_time = ?, total_paused_minutes = ? WHERE id = ?",
+                    (now, round(mins, 4), open_pause["id"])
+                )
             conn.execute(
-                "UPDATE life_tests SET status = 'completed', completed_at = ?, updated_at = ? WHERE id = ?",
+                "UPDATE life_tests SET status = 'completed', completed_at = ?, updated_at = ?, "
+                "paused_at = NULL WHERE id = ?",
                 (now, now, lt_id)
             )
             conn.commit()
@@ -836,8 +946,17 @@ class LocalDB:
 
         Every create/edit is written to ecd_audit_logs.
         """
+        conn = None
         try:
             ecd_date = (ecd_date or "").strip()
+            # Validate the format up front so a stray value (e.g. an ISO datetime
+            # or "08/12/2026") can never be stored — advance_running_ecds parses
+            # ECDs as strict YYYY-MM-DD and would otherwise silently skip them.
+            if ecd_date:
+                try:
+                    datetime.strptime(ecd_date, "%Y-%m-%d")
+                except ValueError:
+                    return {"success": False, "error": "ECD must be a valid date in YYYY-MM-DD format."}
             conn = self.get_connection()
             row = conn.execute(
                 "SELECT ecd, ecd_created_at, ecd_edited FROM life_tests WHERE id = ?",
@@ -907,6 +1026,9 @@ class LocalDB:
             return {"success": True, "ecd": ecd_date, "action": "edit"}
         except Exception as e:
             return {"success": False, "error": str(e)}
+        finally:
+            if conn is not None:
+                conn.close()
 
     def get_ecd_audit_logs(self, lt_id: str) -> List[dict]:
         """Return the ECD change history for a life test (newest first)."""
@@ -931,6 +1053,7 @@ class LocalDB:
         """
         if not days or days <= 0:
             return 0
+        conn = None
         try:
             now = datetime.utcnow().isoformat() + 'Z'
             conn = self.get_connection()
@@ -956,9 +1079,13 @@ class LocalDB:
         except Exception as e:
             print(f"Error advancing ECDs: {e}")
             return 0
+        finally:
+            if conn is not None:
+                conn.close()
 
     def delete_life_test(self, lt_id: str) -> dict:
         """Delete a completed life test and all its associated data"""
+        conn = None
         try:
             conn = self.get_connection()
             conn.execute("DELETE FROM sync_records WHERE life_test_id = ?", (lt_id,))
@@ -968,6 +1095,9 @@ class LocalDB:
             return {"success": True}
         except Exception as e:
             return {"success": False, "error": str(e)}
+        finally:
+            if conn is not None:
+                conn.close()
 
     def get_sync_quality_report(self) -> List[dict]:
         """Sync quality per life test (excludes the initial sync with diff=0)"""
@@ -1030,6 +1160,7 @@ class LocalDB:
 
     def pause_system(self, operator_id: str, operator_name: str, notes: str = None) -> dict:
         """Pause all system timers"""
+        conn = None
         try:
             state = self.get_system_state()
             if state["is_paused"]:
@@ -1052,9 +1183,13 @@ class LocalDB:
             return {"success": True, "paused_at": now, "pause_id": log_id}
         except Exception as e:
             return {"success": False, "error": str(e)}
+        finally:
+            if conn is not None:
+                conn.close()
 
     def resume_system(self, operator_id: str, operator_name: str, notes: str = None) -> dict:
         """Resume all system timers"""
+        conn = None
         try:
             state = self.get_system_state()
             if not state["is_paused"]:
@@ -1083,6 +1218,9 @@ class LocalDB:
             return {"success": True, "resumed_at": now, "total_paused_minutes": round(duration_minutes, 4)}
         except Exception as e:
             return {"success": False, "error": str(e)}
+        finally:
+            if conn is not None:
+                conn.close()
 
     def get_pause_logs(self, limit: int = 100) -> List[dict]:
         """Get all pause/resume log entries newest first"""
@@ -1140,6 +1278,7 @@ class LocalDB:
         reason = (reason or "").strip()
         if not reason:
             return {"success": False, "error": "A pause reason is required"}
+        conn = None
         try:
             conn = self.get_connection()
             row = conn.execute("SELECT status FROM life_tests WHERE id = ?", (lt_id,)).fetchone()
@@ -1167,10 +1306,14 @@ class LocalDB:
             return {"success": True, "paused_at": now, "pause_id": log_id, "reason": reason}
         except Exception as e:
             return {"success": False, "error": str(e)}
+        finally:
+            if conn is not None:
+                conn.close()
 
     def resume_life_test(self, lt_id: str, operator_id: str, operator_name: str) -> dict:
         """Resume a paused life test (slot), closing the open pause log and
         accumulating its duration. The test timer continues from where it stopped."""
+        conn = None
         try:
             conn = self.get_connection()
             row = conn.execute("SELECT status, paused_at FROM life_tests WHERE id = ?", (lt_id,)).fetchone()
@@ -1205,6 +1348,9 @@ class LocalDB:
             return {"success": True, "resumed_at": now, "total_paused_minutes": round(duration_minutes, 4)}
         except Exception as e:
             return {"success": False, "error": str(e)}
+        finally:
+            if conn is not None:
+                conn.close()
 
     def get_test_pause_logs(self, lt_id: str, limit: int = 100) -> List[dict]:
         """Get the pause/resume history for a single life test (newest first)."""

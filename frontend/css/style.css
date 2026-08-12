@@ -42,6 +42,7 @@ body {
     background: linear-gradient(145deg, #1e3a8a 0%, #0f766e 100%);
     padding: 24px;
 }
+.login-note { margin-top: 16px; font-size: 12.5px; color: var(--muted); text-align: center; line-height: 1.5; }
 .login-box {
     background: var(--surface);
     border-radius: 20px;

@@ -24,6 +24,22 @@ class UserLogin(BaseModel):
     email: EmailStr
     password: str
 
+class AdminUserCreate(BaseModel):
+    """Admin-only user creation. Unlike self-registration, the role is explicit."""
+    email: EmailStr
+    password: str
+    full_name: str
+    role: UserRole = UserRole.ACCESS_PERSON
+
+class RoleUpdate(BaseModel):
+    """Admin-only role change"""
+    role: UserRole
+
+class ChangePassword(BaseModel):
+    """Change the signed-in user's own password"""
+    current_password: str
+    new_password: str
+
 class UserResponse(BaseModel):
     """User response model"""
     id: str

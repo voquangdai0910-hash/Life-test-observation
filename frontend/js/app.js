@@ -494,7 +494,7 @@ async function loadLifeTests() {
         }
         renderDashboardGroups();
     } catch(err) {
-        grid.innerHTML = `<div class="empty-state error">${err.message}</div>`;
+        grid.innerHTML = `<div class="empty-state error">${esc(err.message)}</div>`;
     }
 }
 
@@ -1369,7 +1369,7 @@ async function loadReports() {
                 <td>${r.max_diff_minutes != null ? r.max_diff_minutes.toFixed(2) + ' min' : '--'}</td>
             </tr>`).join('');
     } catch(err) {
-        tbody.innerHTML = `<tr><td colspan="6" class="empty-state error">${err.message}</td></tr>`;
+        tbody.innerHTML = `<tr><td colspan="6" class="empty-state error">${esc(err.message)}</td></tr>`;
     }
 }
 
@@ -1380,8 +1380,12 @@ function loadSettings() {
     setText('settingsName',  user.full_name || '--');
     setText('settingsEmail', user.email     || '--');
     setText('settingsRole',  user.role      || '--');
+    const isAdmin = user.role === 'admin';
     const card = document.getElementById('syncIntervalCard');
-    if (card) card.style.display = user.role === 'admin' ? '' : 'none';
+    if (card) card.style.display = isAdmin ? '' : 'none';
+    const umCard = document.getElementById('userMgmtCard');
+    if (umCard) umCard.style.display = isAdmin ? '' : 'none';
+    if (isAdmin) loadUsers();
 }
 
 async function handleIntervalUpdate(e) {
@@ -1392,6 +1396,100 @@ async function handleIntervalUpdate(e) {
         showToast('Interval updated.', 'success');
     } catch(err) {
         showToast(err.message, 'error');
+    }
+}
+
+async function handleChangePassword(e) {
+    e.preventDefault();
+    const cur = document.getElementById('cpCurrent').value;
+    const nw  = document.getElementById('cpNew').value;
+    const cf  = document.getElementById('cpConfirm').value;
+    if (nw.length < 8) { showToast('New password must be at least 8 characters.', 'error'); return; }
+    if (nw !== cf)     { showToast('New password and confirmation do not match.', 'error'); return; }
+    if (nw === cur)    { showToast('New password must be different from the current one.', 'error'); return; }
+    try {
+        await api.changePassword(cur, nw);
+        showToast('Password changed. Use the new password next time you log in.', 'success');
+        e.target.reset();
+    } catch(err) {
+        showToast('Error: ' + err.message, 'error');
+    }
+}
+
+// ==================== Admin: User Management ====================
+
+const ROLE_LABEL = { operator: 'Operator', access_person: 'Observer', admin: 'Admin' };
+const ROLE_OPTIONS = ['access_person', 'operator', 'admin'];
+
+async function loadUsers() {
+    const tbody = document.getElementById('usersTable');
+    if (!tbody) return;
+    try {
+        const res = await api.listUsers();
+        const users = res.users || [];
+        if (!users.length) { tbody.innerHTML = '<tr><td colspan="4" class="empty-state">No users.</td></tr>'; return; }
+        const meId = api.user && api.user.id;
+        tbody.innerHTML = users.map(u => {
+            const isSelf = u.id === meId;
+            const roleSelect = `<select class="filter-select" onchange="handleChangeRole('${esc(u.id)}', this.value)" ${isSelf ? 'disabled title="You cannot change your own role"' : ''}>
+                ${ROLE_OPTIONS.map(r => `<option value="${r}" ${u.role === r ? 'selected' : ''}>${ROLE_LABEL[r]}</option>`).join('')}
+            </select>`;
+            const delBtn = isSelf ? '' :
+                `<button class="btn btn-sm btn-danger" onclick="handleDeleteUser('${esc(u.id)}', '${esc((u.full_name || u.email).replace(/'/g, ''))}')">Delete</button>`;
+            return `<tr>
+                <td>${esc(u.full_name) || '--'}${isSelf ? ' <span class="date-muted">(you)</span>' : ''}</td>
+                <td>${esc(u.email)}</td>
+                <td>${roleSelect}</td>
+                <td>${delBtn}</td>
+            </tr>`;
+        }).join('');
+    } catch (err) {
+        tbody.innerHTML = `<tr><td colspan="4" class="empty-state error">${esc(err.message)}</td></tr>`;
+    }
+}
+
+async function handleCreateUser(e) {
+    e.preventDefault();
+    const payload = {
+        full_name: document.getElementById('cuName').value.trim(),
+        email:     document.getElementById('cuEmail').value.trim(),
+        password:  document.getElementById('cuPassword').value,
+        role:      document.getElementById('cuRole').value
+    };
+    try {
+        await api.createUser(payload);
+        showToast(`User ${payload.email} created as ${ROLE_LABEL[payload.role]}.`, 'success');
+        e.target.reset();
+        loadUsers();
+    } catch (err) {
+        showToast('Error: ' + err.message, 'error');
+    }
+}
+
+async function handleChangeRole(id, role) {
+    try {
+        await api.setUserRole(id, role);
+        showToast(`Role changed to ${ROLE_LABEL[role]}.`, 'success');
+        loadUsers();
+    } catch (err) {
+        showToast('Error: ' + err.message, 'error');
+        loadUsers();   // revert the dropdown to the real value
+    }
+}
+
+async function handleDeleteUser(id, name) {
+    const ok = await confirmDialog({
+        title: 'Delete account?',
+        message: `Permanently delete "${name}"? This cannot be undone.`,
+        okText: 'Delete', okClass: 'btn-danger', icon: '&#128465;'
+    });
+    if (!ok) return;
+    try {
+        await api.deleteUser(id);
+        showToast('User deleted.', 'success');
+        loadUsers();
+    } catch (err) {
+        showToast('Error: ' + err.message, 'error');
     }
 }
 
