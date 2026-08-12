@@ -83,7 +83,7 @@ class LocalDB:
 
             CREATE TABLE IF NOT EXISTS life_tests (
                 id TEXT PRIMARY KEY,
-                test_label TEXT UNIQUE NOT NULL,
+                test_label TEXT NOT NULL,
                 product TEXT NOT NULL,
                 datecode TEXT,
                 operator_id TEXT NOT NULL REFERENCES users(id),
@@ -183,6 +183,38 @@ class LocalDB:
         except Exception:
             pass  # column already exists
         conn2.close()
+
+        # Migrate legacy databases: drop the UNIQUE constraint on test_label.
+        # A slot name (e.g. "Bed1-slot 7") must be reusable — once the machine in
+        # that slot finishes testing, the next machine takes the same slot. Slots
+        # are distinguished by product + datecode, not by a globally unique label.
+        # SQLite can't drop a column constraint in place, so rebuild the table
+        # (preserving every column and row) only if the old UNIQUE index is present.
+        conn3 = self.get_connection()
+        try:
+            row = conn3.execute(
+                "SELECT sql FROM sqlite_master WHERE type='table' AND name='life_tests'"
+            ).fetchone()
+            if row and row["sql"] and "UNIQUE" in row["sql"].upper():
+                cols = [r[1] for r in conn3.execute("PRAGMA table_info(life_tests)").fetchall()]
+                collist = ", ".join(cols)
+                new_sql = row["sql"].replace("life_tests", "life_tests_new", 1)
+                new_sql = new_sql.replace("test_label TEXT UNIQUE NOT NULL",
+                                          "test_label TEXT NOT NULL")
+                conn3.execute("PRAGMA foreign_keys=OFF")
+                conn3.executescript(
+                    "BEGIN;\n"
+                    f"{new_sql};\n"
+                    f"INSERT INTO life_tests_new ({collist}) SELECT {collist} FROM life_tests;\n"
+                    "DROP TABLE life_tests;\n"
+                    "ALTER TABLE life_tests_new RENAME TO life_tests;\n"
+                    "COMMIT;"
+                )
+                conn3.execute("PRAGMA foreign_keys=ON")
+        except Exception as e:
+            print(f"test_label UNIQUE migration skipped: {e}")
+        finally:
+            conn3.close()
     
     # ==================== User Methods ====================
 
@@ -623,6 +655,17 @@ class LocalDB:
             sync_id = str(uuid.uuid4())
             now = datetime.utcnow().isoformat() + 'Z'
             conn = self.get_connection()
+            # A slot name may be reused across machines, but only one test may be
+            # ACTIVE (running or paused) in a slot at a time. Completed tests keep
+            # their label for history and free the slot for the next machine.
+            active = conn.execute(
+                "SELECT 1 FROM life_tests WHERE test_label = ? AND status IN ('running','paused') LIMIT 1",
+                (test_label,)
+            ).fetchone()
+            if active:
+                return {"success": False,
+                        "error": f"Slot '{test_label}' already has an ongoing test. "
+                                 f"Complete or delete it before starting a new one in this slot."}
             conn.execute(
                 "INSERT INTO life_tests (id, test_label, product, datecode, operator_id, on_minutes, off_minutes, "
                 "target_hours, status, notes, created_at, updated_at) VALUES (?,?,?,?,?,?,?,?,'running',?,?,?)",
@@ -635,8 +678,8 @@ class LocalDB:
             )
             conn.commit()
             return {"success": True, "id": lt_id, "test_label": test_label}
-        except sqlite3.IntegrityError:
-            return {"success": False, "error": f"Test ID '{test_label}' already exists"}
+        except sqlite3.IntegrityError as e:
+            return {"success": False, "error": f"Could not create test: {e}"}
         except Exception as e:
             return {"success": False, "error": str(e)}
         finally:

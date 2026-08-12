@@ -625,7 +625,7 @@ function renderSummaryRow(r) {
     const startStr = fmtDateShort(r.startMs) || '<span class="date-muted">—</span>';
     let endStr;
     if (r.endMs != null) {
-        endStr = fmtDateShort(r.endMs) + (r.endIsExpected ? ' <span class="date-muted">(exp.)</span>' : '');
+        endStr = fmtDateShort(r.endMs) + (r.endIsExpected ? ' <span class="date-muted">(expected)</span>' : '');
     } else {
         endStr = '<span class="date-muted">' + (r.endIsExpected ? 'ECD not set' : '—') + '</span>';
     }
