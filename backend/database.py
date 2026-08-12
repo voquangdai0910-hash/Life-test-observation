@@ -1,5 +1,6 @@
 ﻿import sqlite3
 import uuid
+import re
 from datetime import datetime, timedelta
 from typing import Optional, Dict, List
 import json
@@ -7,6 +8,25 @@ import os
 
 # Local SQLite database file stored alongside this module
 DB_PATH = os.path.join(os.path.dirname(__file__), "local_database.db")
+
+
+def slot_key(label: str) -> str:
+    """Canonical identity of a physical slot, tolerant of formatting differences.
+
+    "Bed1-slot 7", "Bed1-slot7", "Bed1 slot 7", "bed 1 - slot 7" all map to the
+    same key ("bed1slot7"), so a second machine cannot be opened in a slot that
+    is already occupied just because the operator typed the label differently.
+    Labels without a Bed/slot pattern (legacy / free-form IDs) fall back to a
+    case- and separator-insensitive form of the whole label.
+    """
+    s = label or ''
+    bm = re.search(r'bed\s*0*(\d+)', s, re.I)
+    sm = re.search(r'slot\s*0*(\d+)', s, re.I)
+    if bm and sm:
+        return f"bed{int(bm.group(1))}slot{int(sm.group(1))}"
+    if bm:
+        return f"bed{int(bm.group(1))}"
+    return re.sub(r'[^a-z0-9]', '', s.lower())
 
 
 class LocalDB:
@@ -655,17 +675,20 @@ class LocalDB:
             sync_id = str(uuid.uuid4())
             now = datetime.utcnow().isoformat() + 'Z'
             conn = self.get_connection()
-            # A slot name may be reused across machines, but only one test may be
-            # ACTIVE (running or paused) in a slot at a time. Completed tests keep
-            # their label for history and free the slot for the next machine.
-            active = conn.execute(
-                "SELECT 1 FROM life_tests WHERE test_label = ? AND status IN ('running','paused') LIMIT 1",
-                (test_label,)
-            ).fetchone()
-            if active:
-                return {"success": False,
-                        "error": f"Slot '{test_label}' already has an ongoing test. "
-                                 f"Complete or delete it before starting a new one in this slot."}
+            # A slot may be reused across machines, but only one test may be ACTIVE
+            # (running or paused) in a physical slot at a time. Match by the CANONICAL
+            # slot identity — so "Bed1-slot 7" and "Bed1-slot7" count as the same
+            # position — not by the raw label string. Completed tests free the slot.
+            new_key = slot_key(test_label)
+            for row in conn.execute(
+                "SELECT test_label FROM life_tests WHERE status IN ('running','paused')"
+            ).fetchall():
+                if slot_key(row["test_label"]) == new_key:
+                    return {"success": False,
+                            "error": f"This slot is already occupied by an ongoing test "
+                                     f"('{row['test_label']}'). It's the same position as "
+                                     f"'{test_label}' regardless of spacing/formatting. "
+                                     f"Complete or delete it before starting a new one here."}
             conn.execute(
                 "INSERT INTO life_tests (id, test_label, product, datecode, operator_id, on_minutes, off_minutes, "
                 "target_hours, status, notes, created_at, updated_at) VALUES (?,?,?,?,?,?,?,?,'running',?,?,?)",

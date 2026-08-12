@@ -13,6 +13,24 @@ let systemState = {
     total_paused_minutes_ever: 0
 };
 
+/** Dashboard bed-grouping: which beds are currently expanded (by key, e.g. "Bed 1") */
+let expandedBeds = new Set();
+
+/**
+ * Parse a Test ID / Slot label into its bed and slot numbers.
+ * Recognises "Bed<N>" and "slot<N>" anywhere in the label (case/space tolerant),
+ * so "Bed1-slot 7", "Bed 12 - slot 3", "LT-Bed2-slot1" all group correctly.
+ * Labels without a bed fall into the "Other" group (legacy / free-form IDs).
+ */
+function parseBed(label) {
+    const s = String(label || '');
+    const bm = s.match(/bed\s*0*(\d+)/i);
+    const sm = s.match(/slot\s*0*(\d+)/i);
+    const slotNum = sm ? parseInt(sm[1], 10) : Infinity;
+    if (bm) return { key: 'Bed ' + parseInt(bm[1], 10), bedNum: parseInt(bm[1], 10), slotNum };
+    return { key: 'Other', bedNum: Infinity, slotNum };
+}
+
 /** Testing Summary table state — data cache, search, sort and pagination */
 let summaryState = {
     rows: [],          // normalized row objects for all tests (ongoing + completed)
@@ -474,10 +492,84 @@ async function loadLifeTests() {
             </div>`;
             return;
         }
-        grid.innerHTML = liveTestData.map(renderTestCard).join('');
+        renderDashboardGroups();
     } catch(err) {
         grid.innerHTML = `<div class="empty-state error">${err.message}</div>`;
     }
+}
+
+/** Render the dashboard as collapsible bed groups (compact overview of 14×8 slots). */
+function renderDashboardGroups() {
+    const grid = document.getElementById('testsGrid');
+    if (!grid) return;
+    grid.classList.remove('tests-grid');   // container now stacks bed groups vertically
+
+    // Group the (already filtered) tests by bed, sort beds then slots
+    const groups = {};
+    liveTestData.forEach(t => {
+        const p = parseBed(t.test_label);
+        (groups[p.key] = groups[p.key] || { key: p.key, bedNum: p.bedNum, tests: [] })
+            .tests.push(Object.assign({ __slot: p.slotNum }, t));
+    });
+    const ordered = Object.values(groups)
+        .sort((a, b) => (a.bedNum - b.bedNum) || a.key.localeCompare(b.key));
+    ordered.forEach(g => g.tests.sort((a, b) => a.__slot - b.__slot));
+
+    grid.innerHTML = ordered.map(renderBedGroup).join('');
+    updateToggleAllBedsBtn(ordered);
+}
+
+function renderBedGroup(g) {
+    const expanded = expandedBeds.has(g.key);
+    const counts = { running: 0, paused: 0, completed: 0 };
+    g.tests.forEach(t => { counts[t.status] = (counts[t.status] || 0) + 1; });
+    const total = g.tests.length;
+
+    const badges = [];
+    if (counts.running)   badges.push(`<span class="status-badge status-running">${counts.running} ongoing</span>`);
+    if (counts.paused)    badges.push(`<span class="status-badge status-paused">${counts.paused} paused</span>`);
+    if (counts.completed) badges.push(`<span class="status-badge status-completed">${counts.completed} completed</span>`);
+
+    return `
+    <div class="bed-group ${expanded ? 'expanded' : ''}">
+        <div class="bed-header" onclick="toggleBed('${esc(g.key)}')">
+            <span class="bed-chevron">&#9654;</span>
+            <span class="bed-title">${esc(g.key)}</span>
+            <span class="bed-slotcount">${total} slot${total === 1 ? '' : 's'}</span>
+            <span class="bed-counts">${badges.join('')}</span>
+        </div>
+        <div class="bed-body">
+            ${expanded ? `<div class="tests-grid">${g.tests.map(renderTestCard).join('')}</div>` : ''}
+        </div>
+    </div>`;
+}
+
+/** Toggle a single bed open/closed, then refresh live counters for revealed cards. */
+function toggleBed(key) {
+    if (expandedBeds.has(key)) expandedBeds.delete(key);
+    else expandedBeds.add(key);
+    renderDashboardGroups();
+    tick();
+}
+
+/** Expand every bed if any is collapsed; otherwise collapse them all. */
+function toggleAllBeds() {
+    const keys = new Set(liveTestData.map(t => parseBed(t.test_label).key));
+    const allExpanded = [...keys].length > 0 && [...keys].every(k => expandedBeds.has(k));
+    if (allExpanded) expandedBeds.clear();
+    else keys.forEach(k => expandedBeds.add(k));
+    renderDashboardGroups();
+    tick();
+}
+
+/** Keep the Expand/Collapse-all button label in sync with current state. */
+function updateToggleAllBedsBtn(ordered) {
+    const btn = document.getElementById('toggleAllBeds');
+    if (!btn) return;
+    if (!ordered || ordered.length === 0) { btn.style.display = 'none'; return; }
+    btn.style.display = '';
+    const allExpanded = ordered.every(g => expandedBeds.has(g.key));
+    btn.textContent = allExpanded ? 'Collapse all' : 'Expand all';
 }
 
 // ==================== Testing Summary Table ====================
