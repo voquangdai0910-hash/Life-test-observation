@@ -369,8 +369,23 @@ class LocalDB:
             if conn is not None:
                 conn.close()
 
+    # Tables whose reference to a user must BLOCK deletion (substantive ownership).
+    _USER_OWNED_BLOCKING = [("life_tests", "operator_id"),
+                            ("data_uploads", "operator_id"),
+                            ("testing_sessions", "operator_id")]
+    # Nullable references to a user in history/audit logs — detached (SET NULL)
+    # on delete so the log rows survive (anonymised) instead of blocking or being lost.
+    _USER_REF_DETACH = [("sync_records", "operator_id"),
+                        ("system_pause_logs", "operator_id"),
+                        ("life_test_pause_logs", "operator_id"),
+                        ("ecd_audit_logs", "operator_id"),
+                        ("upload_config", "updated_by"),
+                        ("system_state", "paused_by")]
+
     def delete_user(self, user_id: str) -> dict:
-        """Delete a user. Refuses if the user owns records (FK) or is the last admin."""
+        """Delete a user. Refuses to delete the last admin or an account that
+        owns substantive data (life tests / uploads / testing sessions). Incidental
+        audit-log references are detached so historical logs are preserved."""
         conn = None
         try:
             conn = self.get_connection()
@@ -379,20 +394,34 @@ class LocalDB:
                 return {"success": False, "error": "User not found"}
             if row["role"] == "admin" and self.count_admins() <= 1:
                 return {"success": False, "error": "Cannot delete the last remaining admin."}
-            # Block deletion when the user still owns data, to avoid orphaning it.
-            owns = conn.execute(
-                "SELECT ("
-                "  (SELECT COUNT(*) FROM life_tests WHERE operator_id = ?) + "
-                "  (SELECT COUNT(*) FROM data_uploads WHERE operator_id = ?)"
-                ")", (user_id, user_id)
-            ).fetchone()[0]
-            if owns:
-                return {"success": False,
-                        "error": "This account owns life tests / uploads and cannot be deleted. "
-                                 "Change its role to Observer instead."}
+
+            # Block if the account owns real work — deleting it would orphan or
+            # cascade-destroy that data. Change the role to Observer instead.
+            for table, col in self._USER_OWNED_BLOCKING:
+                try:
+                    n = conn.execute(f"SELECT COUNT(*) FROM {table} WHERE {col} = ?", (user_id,)).fetchone()[0]
+                except Exception:
+                    n = 0  # table may not exist on older DBs
+                if n:
+                    return {"success": False,
+                            "error": "This account owns life tests / uploads and cannot be deleted. "
+                                     "Change its role to Observer instead."}
+
+            # Detach incidental log/audit references (nullable FKs) so the delete
+            # doesn't fail on them and the history rows are kept without attribution.
+            for table, col in self._USER_REF_DETACH:
+                try:
+                    conn.execute(f"UPDATE {table} SET {col} = NULL WHERE {col} = ?", (user_id,))
+                except Exception:
+                    pass
+
             conn.execute("DELETE FROM users WHERE id = ?", (user_id,))
             conn.commit()
             return {"success": True}
+        except sqlite3.IntegrityError:
+            return {"success": False,
+                    "error": "This account is still linked to records and cannot be deleted. "
+                             "Change its role to Observer instead."}
         except Exception as e:
             return {"success": False, "error": str(e)}
         finally:

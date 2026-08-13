@@ -17,7 +17,7 @@ from models import (
     LifeTestCreate, SyncInput, ECDInput,
     SystemPauseRequest, SystemStateResponse,
     LifeTestPauseRequest, LifeTestResumeRequest,
-    AdminUserCreate, RoleUpdate, ChangePassword
+    AdminUserCreate, RoleUpdate, ChangePassword, AdminPasswordReset
 )
 
 # Minimum length for a new password (applies to change-password and admin-created accounts)
@@ -167,6 +167,24 @@ async def admin_delete_user(
     if not result["success"]:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=result["error"])
     return {"message": "User deleted"}
+
+
+@app.patch("/api/admin/users/{user_id}/password")
+async def admin_reset_password(
+    user_id: str,
+    payload: AdminPasswordReset,
+    current_user: TokenData = Depends(get_current_admin)
+):
+    """Reset another account's password without knowing the old one (admin only)."""
+    if not db.get_user_by_id(user_id):
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found")
+    new_pw = payload.new_password or ""
+    if len(new_pw) < MIN_PASSWORD_LEN:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST,
+                            detail=f"Password must be at least {MIN_PASSWORD_LEN} characters.")
+    if not db.update_password_hash(user_id, hash_password(new_pw)):
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Could not reset password")
+    return {"message": "Password reset"}
 
 @app.post("/api/auth/login", response_model=TokenResponse)
 async def login(credentials: UserLogin):

@@ -40,6 +40,10 @@ class ChangePassword(BaseModel):
     current_password: str
     new_password: str
 
+class AdminPasswordReset(BaseModel):
+    """Admin-only reset of another account's password (no current password needed)"""
+    new_password: str
+
 class UserResponse(BaseModel):
     """User response model"""
     id: str

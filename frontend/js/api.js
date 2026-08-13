@@ -103,6 +103,7 @@ class LabDataAPI {
     listUsers() { return this.request('GET', '/admin/users'); }
     createUser(payload) { return this.request('POST', '/admin/users', payload); }
     setUserRole(id, role) { return this.request('PATCH', `/admin/users/${id}/role`, { role }); }
+    resetUserPassword(id, newPass) { return this.request('PATCH', `/admin/users/${id}/password`, { new_password: newPass }); }
     deleteUser(id) { return this.request('DELETE', `/admin/users/${id}`); }
 }
 

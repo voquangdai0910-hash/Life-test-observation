@@ -1434,13 +1434,15 @@ async function loadUsers() {
             const roleSelect = `<select class="filter-select" onchange="handleChangeRole('${esc(u.id)}', this.value)" ${isSelf ? 'disabled title="You cannot change your own role"' : ''}>
                 ${ROLE_OPTIONS.map(r => `<option value="${r}" ${u.role === r ? 'selected' : ''}>${ROLE_LABEL[r]}</option>`).join('')}
             </select>`;
+            const nameArg = esc((u.full_name || u.email).replace(/'/g, ''));
+            const resetBtn = `<button class="btn btn-sm btn-outline" onclick="handleResetPassword('${esc(u.id)}', '${nameArg}')">Reset PW</button>`;
             const delBtn = isSelf ? '' :
-                `<button class="btn btn-sm btn-danger" onclick="handleDeleteUser('${esc(u.id)}', '${esc((u.full_name || u.email).replace(/'/g, ''))}')">Delete</button>`;
+                `<button class="btn btn-sm btn-danger" onclick="handleDeleteUser('${esc(u.id)}', '${nameArg}')">Delete</button>`;
             return `<tr>
                 <td>${esc(u.full_name) || '--'}${isSelf ? ' <span class="date-muted">(you)</span>' : ''}</td>
                 <td>${esc(u.email)}</td>
                 <td>${roleSelect}</td>
-                <td>${delBtn}</td>
+                <td><div style="display:flex;gap:6px;flex-wrap:wrap;">${resetBtn}${delBtn}</div></td>
             </tr>`;
         }).join('');
     } catch (err) {
@@ -1488,6 +1490,58 @@ async function handleDeleteUser(id, name) {
         await api.deleteUser(id);
         showToast('User deleted.', 'success');
         loadUsers();
+    } catch (err) {
+        showToast('Error: ' + err.message, 'error');
+    }
+}
+
+/** Themed modal that collects a new password (masked, confirmed). Resolves to
+ *  the password string, or null if cancelled. */
+function resetPasswordDialog(name) {
+    return new Promise(resolve => {
+        const overlay = document.getElementById('resetPwOverlay');
+        if (!overlay) { resolve(null); return; }
+        const nw = document.getElementById('rpNew');
+        const cf = document.getElementById('rpConfirm');
+        const err = document.getElementById('rpError');
+        const okBtn = document.getElementById('rpConfirmBtn');
+        const cancelBtn = document.getElementById('rpCancelBtn');
+        document.getElementById('resetPwTarget').textContent =
+            `Set a new password for "${name}". They will use it the next time they log in.`;
+        nw.value = ''; cf.value = ''; err.style.display = 'none';
+        overlay.style.display = 'flex';
+        nw.focus();
+
+        function cleanup(result) {
+            overlay.style.display = 'none';
+            okBtn.removeEventListener('click', onOk);
+            cancelBtn.removeEventListener('click', onCancel);
+            overlay.removeEventListener('click', onBackdrop);
+            document.removeEventListener('keydown', onKey);
+            resolve(result);
+        }
+        function onOk() {
+            const a = nw.value, b = cf.value;
+            if (a.length < 8) { err.textContent = 'Password must be at least 8 characters.'; err.style.display = ''; return; }
+            if (a !== b)      { err.textContent = 'Passwords do not match.'; err.style.display = ''; return; }
+            cleanup(a);
+        }
+        const onCancel = () => cleanup(null);
+        const onBackdrop = (e) => { if (e.target === overlay) cleanup(null); };
+        const onKey = (e) => { if (e.key === 'Escape') cleanup(null); else if (e.key === 'Enter') onOk(); };
+        okBtn.addEventListener('click', onOk);
+        cancelBtn.addEventListener('click', onCancel);
+        overlay.addEventListener('click', onBackdrop);
+        document.addEventListener('keydown', onKey);
+    });
+}
+
+async function handleResetPassword(id, name) {
+    const newPw = await resetPasswordDialog(name);
+    if (newPw == null) return;
+    try {
+        await api.resetUserPassword(id, newPw);
+        showToast(`Password reset for ${name}. They can log in with the new password.`, 'success');
     } catch (err) {
         showToast('Error: ' + err.message, 'error');
     }
