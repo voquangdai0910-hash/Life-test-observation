@@ -69,6 +69,7 @@ class LabDataAPI {
     completeLifeTest(id) { return this.request('PATCH', `/life-tests/${id}/complete`); }
     deleteLifeTest(id)   { return this.request('DELETE', `/life-tests/${id}`); }
     setECD(id, ecdDate)  { return this.request('PATCH', `/life-tests/${id}/ecd`, { ecd_date: ecdDate }); }
+    setRemark(id, remark) { return this.request('PATCH', `/life-tests/${id}/remark`, { remark }); }
     getEcdLogs(id)       { return this.request('GET', `/life-tests/${id}/ecd-logs`); }
 
     // ── Syncs ──

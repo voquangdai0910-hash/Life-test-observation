@@ -4,7 +4,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Life Test Observation</title>
-    <link rel="stylesheet" href="css/style.css?v=323">
+    <link rel="stylesheet" href="css/style.css?v=326">
 </head>
 <body>
 <div id="app">
@@ -101,6 +101,60 @@
                         <input type="search" id="summarySearch" class="filter-select summary-search"
                                placeholder="&#128269; Search product or datecode..." oninput="onSummarySearch()">
                     </div>
+                    <div class="summary-filters">
+                        <label class="filter-group">
+                            <span class="filter-lbl">Status</span>
+                            <select id="summaryFilterStatus" class="filter-select" onchange="onSummaryFilter()">
+                                <option value="">All</option>
+                                <option value="completed">Completed</option>
+                                <option value="ongoing">Ongoing</option>
+                            </select>
+                        </label>
+                        <label class="filter-group">
+                            <span class="filter-lbl">Year</span>
+                            <select id="summaryFilterYear" class="filter-select" onchange="onSummaryFilter()">
+                                <option value="">All years</option>
+                            </select>
+                        </label>
+                        <label class="filter-group">
+                            <span class="filter-lbl">Month from</span>
+                            <select id="summaryFilterMonthFrom" class="filter-select" onchange="onSummaryFilter()">
+                                <option value="">Any</option>
+                                <option value="1">Jan</option>
+                                <option value="2">Feb</option>
+                                <option value="3">Mar</option>
+                                <option value="4">Apr</option>
+                                <option value="5">May</option>
+                                <option value="6">Jun</option>
+                                <option value="7">Jul</option>
+                                <option value="8">Aug</option>
+                                <option value="9">Sep</option>
+                                <option value="10">Oct</option>
+                                <option value="11">Nov</option>
+                                <option value="12">Dec</option>
+                            </select>
+                        </label>
+                        <label class="filter-group">
+                            <span class="filter-lbl">Month to</span>
+                            <select id="summaryFilterMonthTo" class="filter-select" onchange="onSummaryFilter()">
+                                <option value="">Any</option>
+                                <option value="1">Jan</option>
+                                <option value="2">Feb</option>
+                                <option value="3">Mar</option>
+                                <option value="4">Apr</option>
+                                <option value="5">May</option>
+                                <option value="6">Jun</option>
+                                <option value="7">Jul</option>
+                                <option value="8">Aug</option>
+                                <option value="9">Sep</option>
+                                <option value="10">Oct</option>
+                                <option value="11">Nov</option>
+                                <option value="12">Dec</option>
+                            </select>
+                        </label>
+                        <button class="btn btn-sm btn-outline summary-filter-clear" onclick="clearSummaryFilters()">Clear filters</button>
+                        <span class="filter-hint">Year / Month filter by <strong>End date</strong></span>
+                    </div>
                     <div class="table-card">
                         <table class="data-table summary-table">
                             <thead>
@@ -111,16 +165,20 @@
                                     <th class="sortable" data-key="start" onclick="summarySort('start')">Start Date<span class="sort-caret"></span></th>
                                     <th class="sortable" data-key="end" onclick="summarySort('end')">End Date<span class="sort-caret"></span></th>
                                     <th class="sortable" data-key="duration" onclick="summarySort('duration')">Total Test Duration<span class="sort-caret"></span></th>
+                                    <th>Remark</th>
                                 </tr>
                             </thead>
                             <tbody id="summaryTableBody">
-                                <tr><td colspan="6" class="empty-state">Loading summary...</td></tr>
+                                <tr><td colspan="7" class="empty-state">Loading summary...</td></tr>
                             </tbody>
                         </table>
                     </div>
                     <div class="summary-footer">
                         <span class="summary-count" id="summaryCount"></span>
-                        <div class="summary-pagination" id="summaryPagination"></div>
+                        <div class="summary-footer-right">
+                            <div class="summary-pagination" id="summaryPagination"></div>
+                            <div class="summary-result-counter" id="summaryResultCounter"></div>
+                        </div>
                     </div>
                 </section>
 
@@ -474,8 +532,8 @@
 
 <div id="toast" class="toast" style="display:none;"></div>
 
-<script src="js/api.js?v=323"></script>
-<script src="js/app.js?v=323"></script>
+<script src="js/api.js?v=326"></script>
+<script src="js/app.js?v=326"></script>
 </body>
 </html>
 

@@ -192,6 +192,11 @@ class ECDInput(BaseModel):
     ecd_date: str  # YYYY-MM-DD  (empty string to clear)
 
 
+class RemarkInput(BaseModel):
+    """Admin-only remark on a life test (e.g. why the machine was stopped)"""
+    remark: str = ""  # free text; empty string clears the remark
+
+
 # ==================== System Pause Models ====================
 
 class SystemPauseRequest(BaseModel):

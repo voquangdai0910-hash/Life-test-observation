@@ -14,7 +14,7 @@ from models import (
     UploadIntervalConfig, UploadIntervalResponse, DashboardStats,
     TestingTimeEntry, TestingTimeResponse, CyclePattern, TimeSeriesData,
     DataUploadWithOnHours, TestingSessionWithOnHours,
-    LifeTestCreate, SyncInput, ECDInput,
+    LifeTestCreate, SyncInput, ECDInput, RemarkInput,
     SystemPauseRequest, SystemStateResponse,
     LifeTestPauseRequest, LifeTestResumeRequest,
     AdminUserCreate, RoleUpdate, ChangePassword, AdminPasswordReset
@@ -855,6 +855,27 @@ async def set_ecd(
         "action": result.get("action"),
         "ecd_status": ecd_status
     }
+
+
+@app.patch("/api/life-tests/{lt_id}/remark")
+async def set_remark(
+    lt_id: str,
+    payload: RemarkInput,
+    current_user: TokenData = Depends(get_current_admin)
+):
+    """Set or clear the admin remark on a life test (admin only).
+
+    Used to record why a machine failed or was stopped mid-test. The
+    get_current_admin dependency guarantees non-admins get a 403 even if
+    they call the API directly.
+    """
+    test = db.get_life_test(lt_id)
+    if not test:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Life test not found")
+    result = db.set_remark(lt_id, payload.remark)
+    if not result["success"]:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=result["error"])
+    return {"message": "Remark updated", "remark": result["remark"]}
 
 
 @app.get("/api/life-tests/{lt_id}/ecd-logs")

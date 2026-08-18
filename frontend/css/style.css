@@ -509,6 +509,22 @@ body {
 .summary-header { align-items: center; }
 .summary-search { min-width: 260px; }
 
+.summary-filters {
+    display: flex; flex-wrap: wrap; gap: 14px; align-items: flex-end;
+    margin: 6px 0 18px;
+}
+.filter-group { display: flex; flex-direction: column; gap: 5px; }
+.filter-lbl {
+    font-size: 11px; font-weight: 700; text-transform: uppercase;
+    letter-spacing: .05em; color: var(--text-2);
+}
+.summary-filters .filter-select { min-width: 130px; }
+.summary-filter-clear { align-self: flex-end; }
+.filter-hint {
+    font-size: 12px; color: var(--text-2); align-self: center;
+    margin-left: auto;
+}
+
 .summary-table th.sortable { cursor: pointer; user-select: none; white-space: nowrap; }
 .summary-table th.sortable:hover { color: var(--text-2); }
 .summary-table th .sort-caret { display: inline-block; width: 12px; margin-left: 4px; opacity: .55; font-size: 10px; }
@@ -524,6 +540,25 @@ body {
 .dur-primary { font-weight: 700; color: var(--text); }
 .dur-sub { display: block; font-size: 12px; color: var(--muted); margin-top: 2px; }
 
+/* Remark column (admin-editable) */
+.summary-table td.col-remark { min-width: 190px; max-width: 320px; vertical-align: top; }
+.remark-view { display: flex; align-items: flex-start; gap: 6px; }
+.remark-text { white-space: pre-wrap; word-break: break-word; font-size: 13px; color: var(--text-2); }
+.remark-text.remark-empty { color: var(--muted); font-style: italic; }
+.remark-edit-btn {
+    flex: 0 0 auto; border: none; background: transparent; cursor: pointer;
+    color: var(--muted); font-size: 14px; line-height: 1; padding: 2px 4px; border-radius: 6px;
+}
+.remark-edit-btn:hover { color: var(--primary); background: var(--primary-lt); }
+.remark-edit { display: flex; flex-direction: column; gap: 6px; }
+.remark-input {
+    width: 100%; resize: vertical; padding: 7px 9px; font-size: 13px;
+    border: 1.5px solid var(--border); border-radius: 8px; background: var(--surface);
+    color: var(--text); font-family: inherit;
+}
+.remark-input:focus { outline: none; border-color: var(--primary); }
+.remark-actions { display: flex; gap: 6px; }
+
 .summary-footer {
     display: flex; align-items: center; justify-content: space-between;
     margin-top: 14px; flex-wrap: wrap; gap: 10px;
@@ -538,6 +573,18 @@ body {
 .summary-pagination button:hover:not(:disabled) { border-color: var(--primary); color: var(--primary); }
 .summary-pagination button.active { background: var(--primary); border-color: var(--primary); color: #fff; }
 .summary-pagination button:disabled { opacity: .45; cursor: default; }
+
+.summary-footer-right { display: flex; align-items: center; gap: 16px; margin-left: auto; }
+.summary-result-counter {
+    display: inline-flex; align-items: baseline; gap: 8px;
+    padding: 8px 16px; border-radius: 999px;
+    background: var(--primary-lt); color: var(--primary);
+    white-space: nowrap;
+}
+.summary-result-counter .rc-num { font-size: 20px; font-weight: 800; line-height: 1; }
+.summary-result-counter .rc-lbl {
+    font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: .04em;
+}
 
 /* ═══════════════════════════════
    TOAST

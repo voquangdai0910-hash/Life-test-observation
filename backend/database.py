@@ -112,6 +112,7 @@ class LocalDB:
                 target_hours INTEGER DEFAULT 468,
                 status TEXT CHECK(status IN ('running','completed','paused')) DEFAULT 'running',
                 notes TEXT,
+                remark TEXT,
                 completed_at TEXT,
                 ecd TEXT,
                 created_at TEXT DEFAULT (datetime('now')),
@@ -191,7 +192,8 @@ class LocalDB:
         # Migrate existing databases: add new columns if absent
         conn2 = self.get_connection()
         for col in ('completed_at', 'ecd', 'paused_at',
-                    'ecd_original', 'ecd_created_at', 'ecd_created_by', 'datecode'):
+                    'ecd_original', 'ecd_created_at', 'ecd_created_by', 'datecode',
+                    'remark'):
             try:
                 conn2.execute(f"ALTER TABLE life_tests ADD COLUMN {col} TEXT")
                 conn2.commit()
@@ -952,6 +954,31 @@ class LocalDB:
             )
             conn.commit()
             return {"success": True}
+        except Exception as e:
+            return {"success": False, "error": str(e)}
+        finally:
+            if conn is not None:
+                conn.close()
+
+    def set_remark(self, lt_id: str, remark: str) -> dict:
+        """Set or clear the admin remark for a life test.
+
+        The remark is free text (e.g. why a machine failed / was stopped
+        mid-test). Writing is restricted to admins at the API layer.
+        """
+        conn = None
+        try:
+            remark = (remark or "").strip()
+            now = datetime.utcnow().isoformat() + 'Z'
+            conn = self.get_connection()
+            cur = conn.execute(
+                "UPDATE life_tests SET remark = ?, updated_at = ? WHERE id = ?",
+                (remark if remark else None, now, lt_id)
+            )
+            conn.commit()
+            if cur.rowcount == 0:
+                return {"success": False, "error": "Life test not found"}
+            return {"success": True, "remark": remark}
         except Exception as e:
             return {"success": False, "error": str(e)}
         finally:

@@ -35,6 +35,10 @@ function parseBed(label) {
 let summaryState = {
     rows: [],          // normalized row objects for all tests (ongoing + completed)
     search: '',
+    filterStatus: '',    // '' = all | 'completed' | 'ongoing'
+    filterYear: '',      // '' = all | 'YYYY' — matched against End date
+    filterMonthFrom: '', // '' = any | '1'..'12' — start of End-date month range
+    filterMonthTo: '',   // '' = any | '1'..'12' — end of End-date month range
     sortKey: null,     // 'status' | 'start' | 'end' | 'duration' — null = default grouped order
     sortDir: 'asc',
     page: 1,
@@ -636,13 +640,35 @@ async function loadSummaryTable() {
                 endIsExpected: !isCompleted,
                 totalDays,
                 elapsedDays,
-                isCompleted
+                isCompleted,
+                remark: t.remark || ''
             };
         });
         summaryState.page = 1;
+        populateSummaryYears();
         renderSummaryTable();
     } catch (err) {
-        body.innerHTML = `<tr><td colspan="6" class="empty-state error">${esc(err.message)}</td></tr>`;
+        body.innerHTML = `<tr><td colspan="7" class="empty-state error">${esc(err.message)}</td></tr>`;
+    }
+}
+
+/** Fill the Year dropdown with the distinct End-date years present in the data. */
+function populateSummaryYears() {
+    const sel = document.getElementById('summaryFilterYear');
+    if (!sel) return;
+    const years = [...new Set(
+        summaryState.rows
+            .filter(r => r.endMs != null)
+            .map(r => new Date(r.endMs).getFullYear())
+    )].sort((a, b) => b - a);
+    const prev = summaryState.filterYear;
+    sel.innerHTML = '<option value="">All years</option>' +
+        years.map(y => `<option value="${y}">${y}</option>`).join('');
+    // Preserve the current selection if it still exists
+    if (prev && years.includes(Number(prev))) {
+        sel.value = prev;
+    } else {
+        summaryState.filterYear = '';
     }
 }
 
@@ -651,10 +677,37 @@ function renderSummaryTable() {
     const body = document.getElementById('summaryTableBody');
     if (!body) return;
 
-    // 1) Filter by search (product or model)
+    // 1) Filter by status + End-date year / month-range + search text
     const q = summaryState.search.trim().toLowerCase();
-    let rows = summaryState.rows.filter(r =>
-        !q || r.product.toLowerCase().includes(q) || r.datecode.toLowerCase().includes(q));
+    const fStatus = summaryState.filterStatus;
+    const fYear = summaryState.filterYear ? Number(summaryState.filterYear) : null;
+    let mFrom = summaryState.filterMonthFrom ? Number(summaryState.filterMonthFrom) : null;
+    let mTo = summaryState.filterMonthTo ? Number(summaryState.filterMonthTo) : null;
+    // Tolerate a reversed range (e.g. from Dec to Aug) by swapping.
+    if (mFrom != null && mTo != null && mFrom > mTo) { const t = mFrom; mFrom = mTo; mTo = t; }
+    const lo = mFrom != null ? mFrom : (mTo != null ? 1 : null);
+    const hi = mTo != null ? mTo : (mFrom != null ? 12 : null);
+    const hasPeriod = fYear != null || lo != null;
+    let rows = summaryState.rows.filter(r => {
+        // Status filter
+        if (fStatus === 'completed' && !r.isCompleted) return false;
+        if (fStatus === 'ongoing' && r.isCompleted) return false;
+        // Year / month-range filter (matched against End date). Rows with no
+        // End date are excluded when a period filter is active.
+        if (hasPeriod) {
+            if (r.endMs == null) return false;
+            const d = new Date(r.endMs);
+            if (fYear != null && d.getFullYear() !== fYear) return false;
+            if (lo != null) {
+                const m = d.getMonth() + 1;
+                if (m < lo || m > hi) return false;
+            }
+        }
+        // Search text (product or datecode)
+        if (q && !r.product.toLowerCase().includes(q) && !r.datecode.toLowerCase().includes(q)) return false;
+        return true;
+    });
+    const hasFilters = !!(q || fStatus || hasPeriod);
 
     // 2) Sort
     const key = summaryState.sortKey;
@@ -692,9 +745,10 @@ function renderSummaryTable() {
 
     const total = rows.length;
     if (total === 0) {
-        body.innerHTML = `<tr><td colspan="6" class="empty-state">${q ? 'No machines match your search.' : 'No testing records yet.'}</td></tr>`;
+        body.innerHTML = `<tr><td colspan="7" class="empty-state">${hasFilters ? 'No records match the current filters.' : 'No testing records yet.'}</td></tr>`;
         document.getElementById('summaryCount').textContent = '';
         document.getElementById('summaryPagination').innerHTML = '';
+        updateSummaryCounter(0, fStatus, fYear, lo, hi);
         return;
     }
 
@@ -711,6 +765,25 @@ function renderSummaryTable() {
     const from = start + 1, to = start + pageRows.length;
     document.getElementById('summaryCount').textContent = `Showing ${from}–${to} of ${total} machine${total === 1 ? '' : 's'}`;
     renderSummaryPagination(pageCount);
+    updateSummaryCounter(total, fStatus, fYear, lo, hi);
+}
+
+/** Bottom-right badge: how many samples match the active filter conditions. */
+function updateSummaryCounter(total, fStatus, fYear, lo, hi) {
+    const el = document.getElementById('summaryResultCounter');
+    if (!el) return;
+    const MONTHS = ['', 'Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun',
+                    'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+    const noun = total === 1 ? 'sample' : 'samples';
+    const parts = [];
+    if (fStatus === 'completed') parts.push('Completed');
+    else if (fStatus === 'ongoing') parts.push('Ongoing');
+    let period = '';
+    if (lo != null) period = (lo === hi) ? MONTHS[lo] : `${MONTHS[lo]}–${MONTHS[hi]}`;
+    if (fYear != null) period = period ? `${period} ${fYear}` : String(fYear);
+    if (period) parts.push(period);
+    const desc = parts.length ? `${noun} · ${parts.join(' · ')}` : noun;
+    el.innerHTML = `<span class="rc-num">${total}</span><span class="rc-lbl">${esc(desc)}</span>`;
 }
 
 function renderSummaryRow(r) {
@@ -741,7 +814,72 @@ function renderSummaryRow(r) {
         <td class="col-date">${startStr}</td>
         <td class="col-date">${endStr}</td>
         <td class="col-duration">${durHtml}</td>
+        <td class="col-remark" id="remark-cell-${esc(r.id)}" onclick="event.stopPropagation()">${renderRemarkCell(r)}</td>
     </tr>`;
+}
+
+/** True when the signed-in user is an admin (only admins may edit remarks). */
+function isAdminUser() {
+    return !!(api.user && api.user.role === 'admin');
+}
+
+/** Display-mode content for a Remark cell. Admins also get an edit button. */
+function renderRemarkCell(r) {
+    const admin = isAdminUser();
+    const hasText = !!(r.remark && r.remark.trim());
+    const text = hasText
+        ? `<span class="remark-text">${esc(r.remark)}</span>`
+        : `<span class="remark-text remark-empty">${admin ? 'Add remark…' : '—'}</span>`;
+    const btn = admin
+        ? `<button class="remark-edit-btn" title="Edit remark" onclick="startEditRemark('${esc(r.id)}')">&#9998;</button>`
+        : '';
+    return `<div class="remark-view">${text}${btn}</div>`;
+}
+
+/** Switch a Remark cell into edit mode (admin only). */
+function startEditRemark(id) {
+    if (!isAdminUser()) return;
+    const cell = document.getElementById(`remark-cell-${id}`);
+    const row = summaryState.rows.find(r => r.id === id);
+    if (!cell || !row) return;
+    const current = row.remark || '';
+    cell.innerHTML = `
+        <div class="remark-edit">
+            <textarea class="remark-input" id="remark-input-${esc(id)}"
+                      rows="2" placeholder="Note why the machine failed / was stopped…">${esc(current)}</textarea>
+            <div class="remark-actions">
+                <button class="btn btn-sm btn-primary" onclick="saveRemark('${esc(id)}')">Save</button>
+                <button class="btn btn-sm btn-outline" onclick="cancelEditRemark('${esc(id)}')">Cancel</button>
+            </div>
+        </div>`;
+    const ta = document.getElementById(`remark-input-${id}`);
+    if (ta) { ta.focus(); ta.setSelectionRange(ta.value.length, ta.value.length); }
+}
+
+/** Discard edits and restore the Remark cell to display mode. */
+function cancelEditRemark(id) {
+    const cell = document.getElementById(`remark-cell-${id}`);
+    const row = summaryState.rows.find(r => r.id === id);
+    if (cell && row) cell.innerHTML = renderRemarkCell(row);
+}
+
+/** Persist a remark via the admin-only API, then restore display mode. */
+async function saveRemark(id) {
+    const ta = document.getElementById(`remark-input-${id}`);
+    const row = summaryState.rows.find(r => r.id === id);
+    if (!ta || !row) return;
+    const value = ta.value.trim();
+    ta.disabled = true;
+    try {
+        const res = await api.setRemark(id, value);
+        row.remark = res.remark || '';
+        const cell = document.getElementById(`remark-cell-${id}`);
+        if (cell) cell.innerHTML = renderRemarkCell(row);
+        showToast('Remark saved.', 'success');
+    } catch (err) {
+        ta.disabled = false;
+        showToast(err.message || 'Failed to save remark.', 'error');
+    }
 }
 
 function renderSummaryPagination(pageCount) {
@@ -764,6 +902,32 @@ function summaryGoPage(p) {
 
 function onSummarySearch() {
     summaryState.search = document.getElementById('summarySearch').value || '';
+    summaryState.page = 1;
+    renderSummaryTable();
+}
+
+/** Read the Status / Year / Month-range dropdowns into state and re-render. */
+function onSummaryFilter() {
+    summaryState.filterStatus = document.getElementById('summaryFilterStatus').value || '';
+    summaryState.filterYear = document.getElementById('summaryFilterYear').value || '';
+    summaryState.filterMonthFrom = document.getElementById('summaryFilterMonthFrom').value || '';
+    summaryState.filterMonthTo = document.getElementById('summaryFilterMonthTo').value || '';
+    summaryState.page = 1;
+    renderSummaryTable();
+}
+
+/** Reset every filter (status, year, month range, search) back to "all". */
+function clearSummaryFilters() {
+    summaryState.filterStatus = '';
+    summaryState.filterYear = '';
+    summaryState.filterMonthFrom = '';
+    summaryState.filterMonthTo = '';
+    summaryState.search = '';
+    ['summaryFilterStatus', 'summaryFilterYear', 'summaryFilterMonthFrom',
+     'summaryFilterMonthTo', 'summarySearch'].forEach(id => {
+        const el = document.getElementById(id);
+        if (el) el.value = '';
+    });
     summaryState.page = 1;
     renderSummaryTable();
 }
