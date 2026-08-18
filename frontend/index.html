@@ -4,7 +4,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Life Test Observation</title>
-    <link rel="stylesheet" href="css/style.css?v=326">
+    <link rel="stylesheet" href="css/style.css?v=327">
 </head>
 <body>
 <div id="app">
@@ -153,7 +153,10 @@
                             </select>
                         </label>
                         <button class="btn btn-sm btn-outline summary-filter-clear" onclick="clearSummaryFilters()">Clear filters</button>
-                        <span class="filter-hint">Year / Month filter by <strong>End date</strong></span>
+                        <div class="summary-filters-right">
+                            <div class="summary-result-counter" id="summaryResultCounter"></div>
+                            <span class="filter-hint">Year / Month filter by <strong>End date</strong></span>
+                        </div>
                     </div>
                     <div class="table-card">
                         <table class="data-table summary-table">
@@ -175,10 +178,7 @@
                     </div>
                     <div class="summary-footer">
                         <span class="summary-count" id="summaryCount"></span>
-                        <div class="summary-footer-right">
-                            <div class="summary-pagination" id="summaryPagination"></div>
-                            <div class="summary-result-counter" id="summaryResultCounter"></div>
-                        </div>
+                        <div class="summary-pagination" id="summaryPagination"></div>
                     </div>
                 </section>
 
@@ -532,8 +532,8 @@
 
 <div id="toast" class="toast" style="display:none;"></div>
 
-<script src="js/api.js?v=326"></script>
-<script src="js/app.js?v=326"></script>
+<script src="js/api.js?v=327"></script>
+<script src="js/app.js?v=327"></script>
 </body>
 </html>
 
